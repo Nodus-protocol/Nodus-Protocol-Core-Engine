@@ -1,0 +1,9 @@
+[package]
+name = "nodus-core-engine"
+version = "0.1.0"
+edition = "2024"
+description = "Core payment processing engine for the Nodus Protocol"
+license = "MIT"
+
+[dependencies]
+uuid = { version = "1", features = ["v4"] }
