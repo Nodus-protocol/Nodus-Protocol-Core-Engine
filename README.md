@@ -59,8 +59,8 @@ Customer initiates payment
 
 ### Prerequisites
 
-- Node.js ≥ 18
-- npm or yarn
+- Rust 1.80+ (2024 edition)
+- Cargo
 - An RPC endpoint for your target network
 
 ### Installation
@@ -68,7 +68,7 @@ Customer initiates payment
 ```bash
 git clone https://github.com/Nodus-protocol/Nodus-Protocol-Core-Engine.git
 cd Nodus-Protocol-Core-Engine
-npm install
+cargo build
 ```
 
 ### Configuration
@@ -89,13 +89,13 @@ cp .env.example .env
 ### Running locally
 
 ```bash
-npm run dev
+cargo run
 ```
 
 ### Running tests
 
 ```bash
-npm test
+cargo test
 ```
 
 ---
