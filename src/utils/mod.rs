@@ -1,8 +1,6 @@
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-// ── Error types ──────────────────────────────────────────────────────────────
-
 #[derive(Debug, Error)]
 pub enum EngineError {
     #[error("payment not found: {0}")]
@@ -26,8 +24,6 @@ impl EngineError {
         }
     }
 }
-
-// ── Domain types ─────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -57,7 +53,6 @@ pub struct Payment {
     pub id: String,
     pub sender: String,
     pub recipient: String,
-    /// Amount in the token's base unit (stroops for XLM, etc.)
     pub amount: u64,
     pub token: String,
     pub status: PaymentStatus,
@@ -92,7 +87,6 @@ impl Default for FeeEstimate {
     }
 }
 
-/// Standard JSON error envelope returned on all 4xx/5xx responses.
 #[derive(Debug, Serialize)]
 pub struct ApiError {
     pub code: &'static str,
