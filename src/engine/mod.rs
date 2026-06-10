@@ -1,27 +1,26 @@
 use std::sync::Arc;
-
-use dashmap::DashMap;
 use uuid::Uuid;
 
 use crate::adapters::ChainAdapter;
+use crate::retry::{retry, RetryConfig};
+use crate::router::Router;
+use crate::store::PaymentStore;
 use crate::utils::{now_utc, EngineError, FeeEstimate, Payment, PaymentStatus, Urgency};
 
-// ── Engine ───────────────────────────────────────────────────────────────────
-
 pub struct Engine {
-    adapter: Arc<dyn ChainAdapter>,
-    payments: DashMap<String, Payment>,
+    router: Router,
+    store: PaymentStore,
+    retry_config: RetryConfig,
 }
 
 impl Engine {
-    pub fn new(adapter: Arc<dyn ChainAdapter>) -> Self {
+    pub fn new(adapters: Vec<Arc<dyn ChainAdapter>>, retry_config: RetryConfig) -> Self {
         Self {
-            adapter,
-            payments: DashMap::new(),
+            router: Router::new(adapters),
+            store: PaymentStore::new(),
+            retry_config,
         }
     }
-
-    // ── Payment lifecycle ─────────────────────────────────────────────────
 
     pub async fn initiate(
         &self,
@@ -32,23 +31,16 @@ impl Engine {
         urgency: Urgency,
     ) -> Result<Payment, EngineError> {
         if sender.is_empty() || recipient.is_empty() {
-            return Err(EngineError::InvalidRequest(
-                "sender and recipient are required".into(),
-            ));
+            return Err(EngineError::InvalidRequest("sender and recipient are required".into()));
         }
         if amount == 0 {
             return Err(EngineError::InvalidRequest("amount must be > 0".into()));
         }
 
-        let fees = self.adapter.fee_estimate().await.unwrap_or_default();
-        let fee_stroops = match urgency {
-            Urgency::Standard => fees.standard_stroops,
-            Urgency::Fast => fees.fast_stroops,
-            Urgency::Urgent => fees.urgent_stroops,
-        };
-
+        let route = self.router.select(&urgency).await?;
         let now = now_utc();
-        let mut payment = Payment {
+
+        let payment = Payment {
             id: Uuid::new_v4().to_string(),
             sender,
             recipient,
@@ -56,55 +48,43 @@ impl Engine {
             token,
             status: PaymentStatus::Pending,
             tx_hash: None,
-            fee_stroops,
+            fee_stroops: route.fee_stroops,
             urgency,
             error: None,
             created_at: now.clone(),
             updated_at: now,
         };
 
-        self.payments.insert(payment.id.clone(), payment.clone());
-        tracing::info!(payment_id = %payment.id, "payment created");
+        self.store.insert(payment.clone());
+        self.store.set_status(&payment.id, PaymentStatus::Processing)?;
 
-        // Submit to chain asynchronously; update status in place.
-        payment.status = PaymentStatus::Processing;
-        self.payments.insert(payment.id.clone(), payment.clone());
+        tracing::info!(payment_id = %payment.id, chain = route.adapter.name(), "payment processing");
 
-        match self.adapter.submit(&payment).await {
+        let adapter = route.adapter.clone();
+        let payment_ref = payment.clone();
+        let retry_cfg = self.retry_config.clone();
+
+        match retry(&retry_cfg, || adapter.submit(&payment_ref)).await {
             Ok(tx_hash) => {
-                payment.status = PaymentStatus::Confirmed;
-                payment.tx_hash = Some(tx_hash);
-                payment.updated_at = now_utc();
-                tracing::info!(
-                    payment_id = %payment.id,
-                    tx_hash    = ?payment.tx_hash,
-                    "payment confirmed"
-                );
+                self.store.set_confirmed(&payment.id, tx_hash.clone())?;
+                tracing::info!(payment_id = %payment.id, %tx_hash, "payment confirmed");
             }
             Err(e) => {
+                self.store.set_failed(&payment.id, e.to_string())?;
                 tracing::warn!(payment_id = %payment.id, error = %e, "payment failed");
-                payment.status = PaymentStatus::Failed;
-                payment.error = Some(e.to_string());
-                payment.updated_at = now_utc();
             }
         }
 
-        self.payments.insert(payment.id.clone(), payment.clone());
-        Ok(payment)
+        self.store.get(&payment.id)
     }
 
     pub fn get(&self, id: &str) -> Result<Payment, EngineError> {
-        self.payments
-            .get(id)
-            .map(|r| r.value().clone())
-            .ok_or_else(|| EngineError::NotFound(id.to_string()))
+        self.store.get(id)
     }
 
     pub fn list(&self) -> Vec<Payment> {
-        self.payments.iter().map(|r| r.value().clone()).collect()
+        self.store.list()
     }
-
-    // ── Simulation (dry-run) ──────────────────────────────────────────────
 
     pub async fn simulate(
         &self,
@@ -118,49 +98,33 @@ impl Engine {
             return Err(EngineError::InvalidRequest("amount must be > 0".into()));
         }
 
-        let fees = self.adapter.fee_estimate().await.unwrap_or_default();
-        let fee_stroops = match urgency {
-            Urgency::Standard => fees.standard_stroops,
-            Urgency::Fast => fees.fast_stroops,
-            Urgency::Urgent => fees.urgent_stroops,
-        };
-        let estimated_seconds = match urgency {
-            Urgency::Standard => fees.standard_seconds,
-            Urgency::Fast => fees.fast_seconds,
-            Urgency::Urgent => fees.urgent_seconds,
-        };
+        let route = self.router.select(&urgency).await?;
 
         Ok(SimulationResult {
             sender,
             recipient,
             amount,
             token,
-            fee_stroops,
-            chain: self.adapter.name().to_string(),
-            estimated_confirmation_seconds: estimated_seconds,
+            fee_stroops: route.fee_stroops,
+            chain: route.adapter.name().to_string(),
+            estimated_confirmation_seconds: route.estimated_seconds,
         })
     }
 
-    // ── Fees ──────────────────────────────────────────────────────────────
-
-    pub async fn current_fees(&self) -> FeeEstimate {
-        self.adapter.fee_estimate().await.unwrap_or_default()
+    pub async fn current_fees(&self) -> Vec<crate::router::ChainFees> {
+        self.router.all_fees().await
     }
 
-    // ── Health ────────────────────────────────────────────────────────────
-
     pub async fn health(&self) -> HealthStatus {
-        let chain_ok = self.adapter.fee_estimate().await.is_ok();
+        let fees = self.router.all_fees().await;
+        let any_up = fees.iter().any(|f| f.available);
         HealthStatus {
-            status: if chain_ok { "ok" } else { "degraded" },
-            chain: self.adapter.name(),
-            chain_reachable: chain_ok,
-            payments_in_store: self.payments.len(),
+            status: if any_up { "ok" } else { "degraded" },
+            chains: fees.iter().map(|f| f.chain).collect(),
+            payments_in_store: self.store.len(),
         }
     }
 }
-
-// ── Response types ────────────────────────────────────────────────────────────
 
 #[derive(serde::Serialize)]
 pub struct SimulationResult {
@@ -176,7 +140,6 @@ pub struct SimulationResult {
 #[derive(serde::Serialize)]
 pub struct HealthStatus {
     pub status: &'static str,
-    pub chain: &'static str,
-    pub chain_reachable: bool,
+    pub chains: Vec<&'static str>,
     pub payments_in_store: usize,
 }
