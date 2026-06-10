@@ -2,14 +2,17 @@ use std::sync::Arc;
 use uuid::Uuid;
 
 use crate::adapters::ChainAdapter;
+use crate::idempotency::IdempotencyStore;
 use crate::retry::{retry, RetryConfig};
 use crate::router::Router;
 use crate::store::PaymentStore;
 use crate::utils::{now_utc, EngineError, FeeEstimate, Payment, PaymentStatus, Urgency};
+use crate::validation;
 
 pub struct Engine {
     router: Router,
     store: PaymentStore,
+    idempotency: IdempotencyStore,
     retry_config: RetryConfig,
 }
 
@@ -18,8 +21,13 @@ impl Engine {
         Self {
             router: Router::new(adapters),
             store: PaymentStore::new(),
+            idempotency: IdempotencyStore::new(),
             retry_config,
         }
+    }
+
+    pub fn idempotency(&self) -> &IdempotencyStore {
+        &self.idempotency
     }
 
     pub async fn initiate(
@@ -30,12 +38,10 @@ impl Engine {
         token: String,
         urgency: Urgency,
     ) -> Result<Payment, EngineError> {
-        if sender.is_empty() || recipient.is_empty() {
-            return Err(EngineError::InvalidRequest("sender and recipient are required".into()));
-        }
-        if amount == 0 {
-            return Err(EngineError::InvalidRequest("amount must be > 0".into()));
-        }
+        validation::stellar_address(&sender)?;
+        validation::stellar_address(&recipient)?;
+        validation::amount(amount)?;
+        validation::token(&token)?;
 
         let route = self.router.select(&urgency).await?;
         let now = now_utc();
@@ -58,20 +64,24 @@ impl Engine {
         self.store.insert(payment.clone());
         self.store.set_status(&payment.id, PaymentStatus::Processing)?;
 
-        tracing::info!(payment_id = %payment.id, chain = route.adapter.name(), "payment processing");
+        tracing::info!(
+            payment_id = %payment.id,
+            chain = route.adapter.name(),
+            "payment processing"
+        );
 
         let adapter = route.adapter.clone();
-        let payment_ref = payment.clone();
-        let retry_cfg = self.retry_config.clone();
+        let payment_snapshot = payment.clone();
+        let cfg = self.retry_config.clone();
 
-        match retry(&retry_cfg, || adapter.submit(&payment_ref)).await {
+        match retry(&cfg, || adapter.submit(&payment_snapshot)).await {
             Ok(tx_hash) => {
                 self.store.set_confirmed(&payment.id, tx_hash.clone())?;
-                tracing::info!(payment_id = %payment.id, %tx_hash, "payment confirmed");
+                tracing::info!(payment_id = %payment.id, %tx_hash, "confirmed");
             }
             Err(e) => {
                 self.store.set_failed(&payment.id, e.to_string())?;
-                tracing::warn!(payment_id = %payment.id, error = %e, "payment failed");
+                tracing::warn!(payment_id = %payment.id, error = %e, "failed");
             }
         }
 
@@ -94,10 +104,7 @@ impl Engine {
         token: String,
         urgency: Urgency,
     ) -> Result<SimulationResult, EngineError> {
-        if amount == 0 {
-            return Err(EngineError::InvalidRequest("amount must be > 0".into()));
-        }
-
+        validation::amount(amount)?;
         let route = self.router.select(&urgency).await?;
 
         Ok(SimulationResult {
