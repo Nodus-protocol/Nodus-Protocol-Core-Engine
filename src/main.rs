@@ -98,14 +98,19 @@ async fn main() {
         // Fees & Rates
         .route("/api/v1/fees/current",                 get(api::fees::current))
         .route("/api/v1/rates",                        get(api::rates::get))
-        // AMM Pool
-        .route("/api/v1/pool/reserves",                get(api::pool::reserves))
-        .route("/api/v1/pool/quote",                   get(api::pool::quote))
-        .route("/api/v1/pool/lp-balance",              get(api::pool::lp_balance))
-        .route("/api/v1/pool/stats",                   get(api::pool::pool_stats))
-        .route("/api/v1/pool/build/swap",              post(api::pool::build_swap))
-        .route("/api/v1/pool/build/add-liquidity",     post(api::pool::build_add_liquidity))
-        .route("/api/v1/pool/build/remove-liquidity",  post(api::pool::build_remove_liquidity))
+        // AMM Pool — read
+        .route("/api/v1/pool/reserves",                         get(api::pool::reserves))
+        .route("/api/v1/pool/quote",                            get(api::pool::quote))
+        .route("/api/v1/pool/reverse-quote",                    get(api::pool::reverse_quote))
+        .route("/api/v1/pool/lp-balance",                       get(api::pool::lp_balance))
+        .route("/api/v1/pool/stats",                            get(api::pool::pool_stats))
+        // AMM Pool — simulation (pure math, no signing required)
+        .route("/api/v1/pool/simulate/add-liquidity",           get(api::pool::simulate_add_liquidity))
+        .route("/api/v1/pool/simulate/remove-liquidity",        get(api::pool::simulate_remove_liquidity))
+        // AMM Pool — unsigned tx builders
+        .route("/api/v1/pool/build/swap",                       post(api::pool::build_swap))
+        .route("/api/v1/pool/build/add-liquidity",              post(api::pool::build_add_liquidity))
+        .route("/api/v1/pool/build/remove-liquidity",           post(api::pool::build_remove_liquidity))
         // Webhooks
         .route("/api/v1/webhooks",                     post(api::webhooks::register).get(api::webhooks::list))
         .route("/api/v1/webhooks/:id",                 delete(api::webhooks::delete))

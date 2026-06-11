@@ -57,10 +57,11 @@ impl RateService {
         let mut result = Vec::new();
         for &token in tokens {
             let rate = self.usd_price(token).await;
+            let available = rate.is_ok();
             result.push(TokenRate {
                 token: token.to_string(),
                 usd_price: rate.unwrap_or(0.0),
-                available: rate.is_ok(),
+                available,
             });
         }
         result
