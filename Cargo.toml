@@ -21,7 +21,7 @@ thiserror       = "1"
 reqwest         = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 dashmap         = "5"
 chrono          = { version = "0.4", features = ["serde"] }
-tower-http      = { version = "0.5", features = ["trace", "cors"] }
+tower-http      = { version = "0.6", features = ["trace", "cors"] }
 tower           = "0.4"
 async-trait     = "0.1"
 hmac            = "0.12"
