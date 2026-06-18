@@ -11,6 +11,7 @@ pub struct Config {
     #[allow(dead_code)]
     pub webhook_timeout_secs: u64,
     pub pool: Option<PoolConfig>,
+    pub redis_url: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -76,6 +77,7 @@ impl Config {
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(5),
             pool,
+            redis_url: env::var("REDIS_URL").ok(),
         }
     }
 }

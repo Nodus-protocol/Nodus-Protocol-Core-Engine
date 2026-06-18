@@ -49,7 +49,7 @@ pub async fn initiate(
     Json(req): Json<InitiateRequest>,
 ) -> Result<(StatusCode, impl IntoResponse), EngineError> {
     if let Some(ref key) = req.idempotency_key {
-        if let Some(cached) = ctx.engine.idempotency().get(key) {
+        if let Some(cached) = ctx.engine.idempotency().get(key).await? {
             return Ok((StatusCode::OK, Json(cached).into_response()));
         }
     }
@@ -66,9 +66,10 @@ pub async fn initiate(
         .await?;
 
     if let Some(key) = req.idempotency_key {
-        ctx.engine
-            .idempotency()
-            .set(key, serde_json::to_value(&payment).unwrap_or_default());
+        let body = serde_json::to_value(&payment).unwrap_or_default();
+        if let Err(e) = ctx.engine.idempotency().set(key, body).await {
+            tracing::warn!(error = %e, "failed to store idempotency key");
+        }
     }
 
     Ok((StatusCode::CREATED, Json(payment).into_response()))

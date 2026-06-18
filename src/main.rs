@@ -28,6 +28,8 @@ use tower_http::{
     trace::TraceLayer,
 };
 
+use std::time::Duration;
+
 use adapters::StellarAdapter;
 use api::{AppContext, AppState};
 use circuit_breaker::CircuitBreaker;
@@ -63,7 +65,12 @@ async fn main() {
 
     let stellar = Arc::new(CircuitBreaker::new(stellar_raw, 5, 30));
     let retry_config = RetryConfig::new(cfg.max_retry_attempts, cfg.retry_initial_delay_ms);
-    let engine = Arc::new(Engine::new(vec![stellar], retry_config));
+    let idempotency = idempotency::create_idempotency_store(
+        cfg.redis_url.as_deref(),
+        Duration::from_secs(86_400),
+    )
+    .await;
+    let engine = Arc::new(Engine::new(vec![stellar], retry_config, idempotency));
     let webhooks = Arc::new(WebhookStore::new());
     let rates = RateService::new();
 

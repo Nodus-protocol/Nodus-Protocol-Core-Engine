@@ -12,22 +12,26 @@ use crate::validation;
 pub struct Engine {
     router: Router,
     store: PaymentStore,
-    idempotency: IdempotencyStore,
+    idempotency: Arc<dyn IdempotencyStore>,
     retry_config: RetryConfig,
 }
 
 impl Engine {
-    pub fn new(adapters: Vec<Arc<dyn ChainAdapter>>, retry_config: RetryConfig) -> Self {
+    pub fn new(
+        adapters: Vec<Arc<dyn ChainAdapter>>,
+        retry_config: RetryConfig,
+        idempotency: Arc<dyn IdempotencyStore>,
+    ) -> Self {
         Self {
             router: Router::new(adapters),
             store: PaymentStore::new(),
-            idempotency: IdempotencyStore::new(),
+            idempotency,
             retry_config,
         }
     }
 
-    pub fn idempotency(&self) -> &IdempotencyStore {
-        &self.idempotency
+    pub fn idempotency(&self) -> &dyn IdempotencyStore {
+        &*self.idempotency
     }
 
     pub async fn initiate(
