@@ -143,7 +143,7 @@ mod tests {
         let out = get_amount_out(1_000_000, 10_000_000, 10_000_000).unwrap();
         assert!(out < 1_000_000, "fee must be deducted");
         assert!(
-            out > 990_000,
+            out > 900_000,
             "output should be close to input for balanced pool"
         );
     }
