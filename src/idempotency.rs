@@ -25,7 +25,7 @@ impl RedisIdempotencyStore {
         let client = redis::Client::open(redis_url)
             .map_err(|e| EngineError::Internal(format!("redis client error: {e}")))?;
         let conn = client
-            .get_tokio_connection_manager()
+            .get_connection_manager()
             .await
             .map_err(|e| EngineError::Internal(format!("redis connect error: {e}")))?;
         Ok(Self { conn, ttl })
@@ -82,8 +82,7 @@ impl MemoryIdempotencyStore {
 
     #[allow(dead_code)]
     pub fn evict_expired(&self) {
-        self.entries
-            .retain(|_, v| v.stored_at.elapsed() < self.ttl);
+        self.entries.retain(|_, v| v.stored_at.elapsed() < self.ttl);
     }
 }
 
@@ -142,7 +141,10 @@ mod tests {
     async fn memory_stores_and_retrieves() {
         let store = MemoryIdempotencyStore::new(Duration::from_secs(86_400));
         let val = json!({"id": "abc"});
-        store.set("test-key".to_string(), val.clone()).await.unwrap();
+        store
+            .set("test-key".to_string(), val.clone())
+            .await
+            .unwrap();
         assert_eq!(store.get("test-key").await.unwrap().unwrap(), val);
     }
 
