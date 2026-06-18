@@ -12,11 +12,7 @@ fn memory_store() -> Arc<MemoryIdempotencyStore> {
 }
 
 fn engine_with_mock(mock: MockAdapter) -> Engine {
-    Engine::new(
-        vec![Arc::new(mock)],
-        RetryConfig::new(1, 0),
-        memory_store(),
-    )
+    Engine::new(vec![Arc::new(mock)], RetryConfig::new(1, 0), memory_store())
 }
 
 const ALICE: &str = "GAHJJJKMOKYE4RVPZEWZTKH5FVI4PA3VL7GK2LFNUBSGBV7REEX6XCLD";
