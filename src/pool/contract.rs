@@ -74,18 +74,33 @@ impl ContractClient {
         let reserves = self.fetch_reserves().await?;
 
         let mut guard = self.cache.write().await;
-        *guard = Some(CachedReserves { data: reserves.clone(), fetched_at: Instant::now() });
+        *guard = Some(CachedReserves {
+            data: reserves.clone(),
+            fetched_at: Instant::now(),
+        });
 
         Ok(reserves)
     }
 
-    pub async fn get_quote(&self, amount_in: u128, token_in: &str) -> Result<PriceQuote, EngineError> {
+    pub async fn get_quote(
+        &self,
+        amount_in: u128,
+        token_in: &str,
+    ) -> Result<PriceQuote, EngineError> {
         let reserves = self.get_reserves().await?;
 
         let (reserve_in, reserve_out, token_out) = if token_in == reserves.token_0 {
-            (reserves.reserve_0, reserves.reserve_1, reserves.token_1.clone())
+            (
+                reserves.reserve_0,
+                reserves.reserve_1,
+                reserves.token_1.clone(),
+            )
         } else if token_in == reserves.token_1 {
-            (reserves.reserve_1, reserves.reserve_0, reserves.token_0.clone())
+            (
+                reserves.reserve_1,
+                reserves.reserve_0,
+                reserves.token_0.clone(),
+            )
         } else {
             return Err(EngineError::InvalidRequest(format!(
                 "token '{token_in}' is not in this pool"
@@ -209,11 +224,11 @@ impl ContractClient {
         // Encoded as binary: type(CONTRACT_DATA=2), contract(ScAddress::Contract + 32 bytes), key(SCV_LEDGER_KEY_CONTRACT_INSTANCE=18), durability(PERSISTENT=1)
         let contract_bytes = parse_contract_id(&self.contract_id)?;
         let mut buf = Vec::new();
-        buf.extend_from_slice(&2u32.to_be_bytes());     // LedgerKeyType::ContractData
-        buf.extend_from_slice(&1u32.to_be_bytes());     // ScAddress::Contract
-        buf.extend_from_slice(&contract_bytes);         // 32-byte contract hash
-        buf.extend_from_slice(&18u32.to_be_bytes());    // ScValType::LedgerKeyContractInstance
-        buf.extend_from_slice(&1u32.to_be_bytes());     // ContractDataDurability::Persistent
+        buf.extend_from_slice(&2u32.to_be_bytes()); // LedgerKeyType::ContractData
+        buf.extend_from_slice(&1u32.to_be_bytes()); // ScAddress::Contract
+        buf.extend_from_slice(&contract_bytes); // 32-byte contract hash
+        buf.extend_from_slice(&18u32.to_be_bytes()); // ScValType::LedgerKeyContractInstance
+        buf.extend_from_slice(&1u32.to_be_bytes()); // ContractDataDurability::Persistent
         Ok(B64.encode(&buf))
     }
 
@@ -221,21 +236,21 @@ impl ContractClient {
         let contract_bytes = parse_contract_id(&self.contract_id)?;
         let addr_bytes = parse_contract_id(address)?;
         let mut buf = Vec::new();
-        buf.extend_from_slice(&2u32.to_be_bytes());     // CONTRACT_DATA
-        buf.extend_from_slice(&1u32.to_be_bytes());     // ScAddress::Contract
+        buf.extend_from_slice(&2u32.to_be_bytes()); // CONTRACT_DATA
+        buf.extend_from_slice(&1u32.to_be_bytes()); // ScAddress::Contract
         buf.extend_from_slice(&contract_bytes);
         // key: SCVec [ SCSymbol("LpBalance"), ScAddress::Contract(address) ]
-        buf.extend_from_slice(&11u32.to_be_bytes());    // SCV_VEC
-        buf.extend_from_slice(&2u32.to_be_bytes());     // vec length = 2
-        buf.extend_from_slice(&7u32.to_be_bytes());     // SCV_SYMBOL
+        buf.extend_from_slice(&11u32.to_be_bytes()); // SCV_VEC
+        buf.extend_from_slice(&2u32.to_be_bytes()); // vec length = 2
+        buf.extend_from_slice(&7u32.to_be_bytes()); // SCV_SYMBOL
         let sym = b"LpBalance";
         buf.extend_from_slice(&(sym.len() as u32).to_be_bytes());
         buf.extend_from_slice(sym);
         pad4(&mut buf, sym.len());
-        buf.extend_from_slice(&6u32.to_be_bytes());     // SCV_ADDRESS
-        buf.extend_from_slice(&1u32.to_be_bytes());     // ScAddress::Contract
+        buf.extend_from_slice(&6u32.to_be_bytes()); // SCV_ADDRESS
+        buf.extend_from_slice(&1u32.to_be_bytes()); // ScAddress::Contract
         buf.extend_from_slice(&addr_bytes);
-        buf.extend_from_slice(&1u32.to_be_bytes());     // Persistent
+        buf.extend_from_slice(&1u32.to_be_bytes()); // Persistent
         Ok(B64.encode(&buf))
     }
 }
@@ -244,11 +259,17 @@ fn parse_contract_id(id: &str) -> Result<Vec<u8>, EngineError> {
     let clean = id.trim_start_matches("C");
     hex::decode(clean)
         .or_else(|_| {
-            B64.decode(id).map_err(|_| EngineError::InvalidRequest(format!("invalid contract id: {id}")))
+            B64.decode(id)
+                .map_err(|_| EngineError::InvalidRequest(format!("invalid contract id: {id}")))
         })
         .and_then(|b| {
-            if b.len() == 32 { Ok(b) }
-            else { Err(EngineError::InvalidRequest(format!("contract id must be 32 bytes: {id}"))) }
+            if b.len() == 32 {
+                Ok(b)
+            } else {
+                Err(EngineError::InvalidRequest(format!(
+                    "contract id must be 32 bytes: {id}"
+                )))
+            }
         })
 }
 
@@ -260,7 +281,8 @@ fn pad4(buf: &mut Vec<u8>, len: usize) {
 }
 
 fn parse_i128_from_xdr(xdr: &str) -> Result<u128, EngineError> {
-    let bytes = B64.decode(xdr)
+    let bytes = B64
+        .decode(xdr)
         .map_err(|e| EngineError::Internal(format!("decode xdr: {e}")))?;
     // ScVal::I128 is encoded as: type(SCV_I128=8), hi(i64 BE), lo(u64 BE)
     if bytes.len() < 20 {
@@ -268,15 +290,22 @@ fn parse_i128_from_xdr(xdr: &str) -> Result<u128, EngineError> {
     }
     let hi = i64::from_be_bytes(bytes[4..12].try_into().unwrap_or([0; 8]));
     let lo = u64::from_be_bytes(bytes[12..20].try_into().unwrap_or([0; 8]));
-    if hi < 0 { return Ok(0); }
+    if hi < 0 {
+        return Ok(0);
+    }
     Ok((hi as u128) << 64 | lo as u128)
 }
 
-fn parse_instance_storage(xdr: &str, token_0: &str, token_1: &str) -> Result<PoolReserves, EngineError> {
+fn parse_instance_storage(
+    xdr: &str,
+    token_0: &str,
+    token_1: &str,
+) -> Result<PoolReserves, EngineError> {
     // Minimal parsing: extract Reserve0 and Reserve1 i128 values from the instance XDR.
     // Full XDR parsing requires stellar-xdr crate; this is a structural approximation.
     // Contributors should replace with stellar-xdr deserialization for production.
-    let bytes = B64.decode(xdr)
+    let bytes = B64
+        .decode(xdr)
         .map_err(|e| EngineError::Internal(format!("decode instance xdr: {e}")))?;
 
     let reserve_0 = extract_i128_by_key(&bytes, b"Reserve0").unwrap_or(0);
@@ -297,16 +326,22 @@ fn parse_instance_storage(xdr: &str, token_0: &str, token_1: &str) -> Result<Poo
 fn extract_i128_by_key(buf: &[u8], key: &[u8]) -> Option<u128> {
     let pos = buf.windows(key.len()).position(|w| w == key)?;
     let start = pos + key.len();
-    if start + 16 > buf.len() { return None; }
+    if start + 16 > buf.len() {
+        return None;
+    }
     let hi = i64::from_be_bytes(buf[start..start + 8].try_into().ok()?);
     let lo = u64::from_be_bytes(buf[start + 8..start + 16].try_into().ok()?);
-    if hi < 0 { return Some(0); }
+    if hi < 0 {
+        return Some(0);
+    }
     Some((hi as u128) << 64 | lo as u128)
 }
 
 fn extract_u64_by_key(buf: &[u8], key: &[u8]) -> Option<u64> {
     let pos = buf.windows(key.len()).position(|w| w == key)?;
     let start = pos + key.len();
-    if start + 8 > buf.len() { return None; }
+    if start + 8 > buf.len() {
+        return None;
+    }
     Some(u64::from_be_bytes(buf[start..start + 8].try_into().ok()?))
 }

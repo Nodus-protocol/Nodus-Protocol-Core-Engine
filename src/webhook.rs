@@ -20,8 +20,8 @@ impl WebhookEvent {
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::PaymentConfirmed => "payment.confirmed",
-            Self::PaymentFailed    => "payment.failed",
-            Self::PaymentPending   => "payment.pending",
+            Self::PaymentFailed => "payment.failed",
+            Self::PaymentPending => "payment.pending",
         }
     }
 }
@@ -143,8 +143,7 @@ impl WebhookStore {
 }
 
 fn hmac_sign(secret: &str, body: &str) -> String {
-    let mut mac =
-        HmacSha256::new_from_slice(secret.as_bytes()).expect("HMAC accepts any key size");
+    let mut mac = HmacSha256::new_from_slice(secret.as_bytes()).expect("HMAC accepts any key size");
     mac.update(body.as_bytes());
     hex::encode(mac.finalize().into_bytes())
 }

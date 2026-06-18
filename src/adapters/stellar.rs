@@ -1,7 +1,7 @@
-use async_trait::async_trait;
 use crate::adapters::ChainAdapter;
 use crate::utils::{EngineError, FeeEstimate, Payment};
 use crate::validation;
+use async_trait::async_trait;
 
 pub struct StellarAdapter {
     pub(crate) horizon_url: String,
@@ -48,7 +48,11 @@ impl ChainAdapter for StellarAdapter {
         // Replace with real XDR construction + POST /transactions to Horizon.
         let tx_hash = format!(
             "{:0>64}",
-            payment.id.chars().filter(|c| c.is_alphanumeric()).collect::<String>()
+            payment
+                .id
+                .chars()
+                .filter(|c| c.is_alphanumeric())
+                .collect::<String>()
         );
         Ok(tx_hash)
     }
@@ -77,8 +81,8 @@ impl ChainAdapter for StellarAdapter {
 
                 Ok(FeeEstimate {
                     standard_stroops: parse("fee_charged", "p50"),
-                    fast_stroops:     parse("fee_charged", "p75"),
-                    urgent_stroops:   parse("fee_charged", "p90"),
+                    fast_stroops: parse("fee_charged", "p75"),
+                    urgent_stroops: parse("fee_charged", "p90"),
                     standard_seconds: 5,
                     fast_seconds: 3,
                     urgent_seconds: 1,
@@ -96,7 +100,7 @@ impl ChainAdapter for StellarAdapter {
         let url = format!("{}/transactions/{}", self.horizon_url, tx_hash);
         match self.client.get(&url).send().await {
             Ok(resp) => Ok(resp.status().is_success()),
-            Err(e)   => Err(EngineError::NetworkError(e.to_string())),
+            Err(e) => Err(EngineError::NetworkError(e.to_string())),
         }
     }
 

@@ -4,8 +4,8 @@ pub use stellar::StellarAdapter;
 #[cfg(test)]
 pub mod mock;
 
-use async_trait::async_trait;
 use crate::utils::{EngineError, FeeEstimate, Payment};
+use async_trait::async_trait;
 
 #[async_trait]
 pub trait ChainAdapter: Send + Sync {

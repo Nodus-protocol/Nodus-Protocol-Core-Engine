@@ -1,7 +1,7 @@
+use crate::utils::EngineError;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::sync::atomic::{AtomicU64, Ordering};
-use crate::utils::EngineError;
 
 pub struct SorobanRpc {
     endpoint: String,
@@ -46,7 +46,10 @@ impl SorobanRpc {
         self.id.fetch_add(1, Ordering::Relaxed)
     }
 
-    pub async fn get_ledger_entries(&self, keys: Vec<String>) -> Result<Vec<LedgerEntry>, EngineError> {
+    pub async fn get_ledger_entries(
+        &self,
+        keys: Vec<String>,
+    ) -> Result<Vec<LedgerEntry>, EngineError> {
         let body = json!({
             "jsonrpc": "2.0",
             "id": self.next_id(),

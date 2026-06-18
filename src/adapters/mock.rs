@@ -21,7 +21,10 @@ impl MockAdapter {
     }
 
     pub fn failing(name: &'static str) -> Self {
-        Self { should_fail: true, ..Self::new(name) }
+        Self {
+            should_fail: true,
+            ..Self::new(name)
+        }
     }
 
     pub fn submit_count(&self) -> u32 {

@@ -28,7 +28,13 @@ impl IdempotencyStore {
     }
 
     pub fn set(&self, key: String, body: Value) {
-        self.0.insert(key, Entry { body, stored_at: Instant::now() });
+        self.0.insert(
+            key,
+            Entry {
+                body,
+                stored_at: Instant::now(),
+            },
+        );
     }
 
     pub fn evict_expired(&self) {

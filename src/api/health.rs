@@ -1,5 +1,5 @@
-use axum::{extract::State, http::StatusCode, response::IntoResponse, Json};
 use crate::api::AppState;
+use axum::{extract::State, http::StatusCode, response::IntoResponse, Json};
 
 pub async fn healthz(State(ctx): State<AppState>) -> impl IntoResponse {
     let health = ctx.engine.health().await;

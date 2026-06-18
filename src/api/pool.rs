@@ -89,9 +89,17 @@ pub async fn reverse_quote(
     let reserves = pool.get_reserves().await?;
 
     let (reserve_out, reserve_in, token_in) = if q.token_out == reserves.token_0 {
-        (reserves.reserve_0, reserves.reserve_1, reserves.token_1.clone())
+        (
+            reserves.reserve_0,
+            reserves.reserve_1,
+            reserves.token_1.clone(),
+        )
     } else if q.token_out == reserves.token_1 {
-        (reserves.reserve_1, reserves.reserve_0, reserves.token_0.clone())
+        (
+            reserves.reserve_1,
+            reserves.reserve_0,
+            reserves.token_0.clone(),
+        )
     } else {
         return Err(EngineError::InvalidRequest(format!(
             "token '{}' is not in this pool",
@@ -155,9 +163,13 @@ pub async fn simulate_remove_liquidity(
         })));
     }
 
-    let (amt_0, amt_1) =
-        math::withdrawal_amounts(lp_balance, reserves.reserve_0, reserves.reserve_1, reserves.lp_total_supply)
-            .map_err(|e| EngineError::InvalidRequest(e.to_string()))?;
+    let (amt_0, amt_1) = math::withdrawal_amounts(
+        lp_balance,
+        reserves.reserve_0,
+        reserves.reserve_1,
+        reserves.lp_total_supply,
+    )
+    .map_err(|e| EngineError::InvalidRequest(e.to_string()))?;
 
     let share_bps = ((lp_balance as u128 * 10_000) / reserves.lp_total_supply) as u64;
 
@@ -226,7 +238,8 @@ pub async fn pool_stats(State(ctx): State<AppState>) -> Result<impl IntoResponse
     } else {
         0.0
     };
-    let k = reserves.reserve_0
+    let k = reserves
+        .reserve_0
         .checked_mul(reserves.reserve_1)
         .unwrap_or(u128::MAX);
 
@@ -254,7 +267,12 @@ pub async fn build_swap(
     Json(req): Json<SwapParamsRequest>,
 ) -> Result<impl IntoResponse, EngineError> {
     let pool = pool_or_err(&ctx)?;
-    Ok(Json(pool.build_swap_params(&req.to, req.amount_0_out, req.amount_1_out, req.deadline)))
+    Ok(Json(pool.build_swap_params(
+        &req.to,
+        req.amount_0_out,
+        req.amount_1_out,
+        req.deadline,
+    )))
 }
 
 #[derive(Debug, Deserialize)]

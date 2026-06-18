@@ -45,8 +45,8 @@ where
             Err(e) => {
                 tracing::warn!(attempt, max = config.max_attempts, delay_ms, error = %e, "retrying");
                 sleep(Duration::from_millis(delay_ms)).await;
-                delay_ms = ((delay_ms as f64 * config.backoff_multiplier) as u64)
-                    .min(config.max_delay_ms);
+                delay_ms =
+                    ((delay_ms as f64 * config.backoff_multiplier) as u64).min(config.max_delay_ms);
             }
         }
     }
@@ -75,7 +75,11 @@ mod tests {
             let count = attempts_clone.clone();
             async move {
                 let n = count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                if n < 2 { Err("not yet") } else { Ok(99) }
+                if n < 2 {
+                    Err("not yet")
+                } else {
+                    Ok(99)
+                }
             }
         })
         .await;

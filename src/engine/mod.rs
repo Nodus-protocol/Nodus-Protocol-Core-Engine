@@ -62,7 +62,8 @@ impl Engine {
         };
 
         self.store.insert(payment.clone());
-        self.store.set_status(&payment.id, PaymentStatus::Processing)?;
+        self.store
+            .set_status(&payment.id, PaymentStatus::Processing)?;
 
         tracing::info!(
             payment_id = %payment.id,

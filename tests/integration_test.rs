@@ -10,14 +10,20 @@ fn engine_with_mock(mock: MockAdapter) -> Engine {
 }
 
 const ALICE: &str = "GAHJJJKMOKYE4RVPZEWZTKH5FVI4PA3VL7GK2LFNUBSGBV7REEX6XCLD";
-const BOB:   &str = "GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5";
+const BOB: &str = "GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5";
 
 #[tokio::test]
 async fn successful_payment_is_confirmed() {
     let engine = engine_with_mock(MockAdapter::new("mock"));
 
     let payment = engine
-        .initiate(ALICE.into(), BOB.into(), 1_000_000, "XLM".into(), Urgency::Standard)
+        .initiate(
+            ALICE.into(),
+            BOB.into(),
+            1_000_000,
+            "XLM".into(),
+            Urgency::Standard,
+        )
         .await
         .expect("initiate failed");
 
@@ -55,7 +61,13 @@ async fn rejects_zero_amount() {
 async fn rejects_invalid_sender_address() {
     let engine = engine_with_mock(MockAdapter::new("mock"));
     let result = engine
-        .initiate("not-a-stellar-address".into(), BOB.into(), 100, "XLM".into(), Urgency::Standard)
+        .initiate(
+            "not-a-stellar-address".into(),
+            BOB.into(),
+            100,
+            "XLM".into(),
+            Urgency::Standard,
+        )
         .await;
     assert!(result.is_err());
 }
@@ -65,7 +77,13 @@ async fn payment_is_retrievable_after_creation() {
     let engine = engine_with_mock(MockAdapter::new("mock"));
 
     let payment = engine
-        .initiate(ALICE.into(), BOB.into(), 250, "USDC".into(), Urgency::Urgent)
+        .initiate(
+            ALICE.into(),
+            BOB.into(),
+            250,
+            "USDC".into(),
+            Urgency::Urgent,
+        )
         .await
         .unwrap();
 
@@ -80,7 +98,13 @@ async fn list_returns_all_payments() {
 
     for amount in [100, 200, 300] {
         engine
-            .initiate(ALICE.into(), BOB.into(), amount, "XLM".into(), Urgency::Standard)
+            .initiate(
+                ALICE.into(),
+                BOB.into(),
+                amount,
+                "XLM".into(),
+                Urgency::Standard,
+            )
             .await
             .unwrap();
     }
@@ -107,7 +131,9 @@ async fn idempotency_returns_cached_response() {
     let engine = engine_with_mock(MockAdapter::new("mock"));
     let body = serde_json::json!({"id": "cached-payment-id"});
 
-    engine.idempotency().set("key-001".to_string(), body.clone());
+    engine
+        .idempotency()
+        .set("key-001".to_string(), body.clone());
     let result = engine.idempotency().get("key-001").unwrap();
     assert_eq!(result, body);
 }

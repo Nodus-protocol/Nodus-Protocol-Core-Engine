@@ -1,7 +1,7 @@
+use crate::utils::EngineError;
 use dashmap::DashMap;
 use serde::Serialize;
 use std::time::{Duration, Instant};
-use crate::utils::EngineError;
 
 const CACHE_TTL: Duration = Duration::from_secs(60);
 const COINGECKO_BASE: &str = "https://api.coingecko.com/api/v3";
@@ -39,16 +39,26 @@ impl RateService {
         let price = self.fetch_from_coingecko(&token_lower).await?;
         self.cache.insert(
             token_lower,
-            CachedRate { usd_price: price, fetched_at: Instant::now() },
+            CachedRate {
+                usd_price: price,
+                fetched_at: Instant::now(),
+            },
         );
         Ok(price)
     }
 
-    pub async fn convert(&self, amount: u64, from_token: &str, to_token: &str) -> Result<f64, EngineError> {
+    pub async fn convert(
+        &self,
+        amount: u64,
+        from_token: &str,
+        to_token: &str,
+    ) -> Result<f64, EngineError> {
         let from_usd = self.usd_price(from_token).await?;
         let to_usd = self.usd_price(to_token).await?;
         if to_usd == 0.0 {
-            return Err(EngineError::InvalidRequest(format!("zero price for {to_token}")));
+            return Err(EngineError::InvalidRequest(format!(
+                "zero price for {to_token}"
+            )));
         }
         Ok((amount as f64 * from_usd) / to_usd)
     }
