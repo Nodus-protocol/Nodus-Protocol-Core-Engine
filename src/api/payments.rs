@@ -49,8 +49,12 @@ pub async fn initiate(
     Json(req): Json<InitiateRequest>,
 ) -> Result<(StatusCode, impl IntoResponse), EngineError> {
     if let Some(ref key) = req.idempotency_key {
-        if let Some(cached) = ctx.engine.idempotency().get(key).await? {
-            return Ok((StatusCode::OK, Json(cached).into_response()));
+        match ctx.engine.idempotency().get(key).await {
+            Ok(Some(cached)) => return Ok((StatusCode::OK, Json(cached).into_response())),
+            Err(e) => {
+                tracing::warn!(error = %e, "idempotency get failed, proceeding as first request")
+            }
+            _ => {}
         }
     }
 
