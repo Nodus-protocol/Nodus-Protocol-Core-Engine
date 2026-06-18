@@ -1,5 +1,5 @@
-use dashmap::DashMap;
 use crate::utils::{now_utc, EngineError, Payment, PaymentStatus};
+use dashmap::DashMap;
 
 #[derive(Default)]
 pub struct PaymentStore(DashMap<String, Payment>);
@@ -26,6 +26,11 @@ impl PaymentStore {
 
     pub fn len(&self) -> usize {
         self.0.len()
+    }
+
+    #[allow(dead_code)]
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
     }
 
     pub fn set_status(&self, id: &str, status: PaymentStatus) -> Result<(), EngineError> {

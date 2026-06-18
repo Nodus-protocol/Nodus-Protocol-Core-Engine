@@ -34,18 +34,13 @@ pub enum PaymentStatus {
     Failed,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum Urgency {
+    #[default]
     Standard,
     Fast,
     Urgent,
-}
-
-impl Default for Urgency {
-    fn default() -> Self {
-        Self::Standard
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

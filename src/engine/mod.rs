@@ -6,7 +6,7 @@ use crate::idempotency::IdempotencyStore;
 use crate::retry::{retry, RetryConfig};
 use crate::router::Router;
 use crate::store::PaymentStore;
-use crate::utils::{now_utc, EngineError, FeeEstimate, Payment, PaymentStatus, Urgency};
+use crate::utils::{now_utc, EngineError, Payment, PaymentStatus, Urgency};
 use crate::validation;
 
 pub struct Engine {
@@ -43,7 +43,28 @@ impl Engine {
         validation::amount(amount)?;
         validation::token(&token)?;
 
-        let route = self.router.select(&urgency).await?;
+        let route = match self.router.select(&urgency).await {
+            Ok(r) => r,
+            Err(e) => {
+                let now = now_utc();
+                let payment = Payment {
+                    id: Uuid::new_v4().to_string(),
+                    sender,
+                    recipient,
+                    amount,
+                    token,
+                    status: PaymentStatus::Failed,
+                    tx_hash: None,
+                    fee_stroops: 0,
+                    urgency,
+                    error: Some(e.to_string()),
+                    created_at: now.clone(),
+                    updated_at: now,
+                };
+                self.store.insert(payment.clone());
+                return Ok(payment);
+            }
+        };
         let now = now_utc();
 
         let payment = Payment {
@@ -62,7 +83,8 @@ impl Engine {
         };
 
         self.store.insert(payment.clone());
-        self.store.set_status(&payment.id, PaymentStatus::Processing)?;
+        self.store
+            .set_status(&payment.id, PaymentStatus::Processing)?;
 
         tracing::info!(
             payment_id = %payment.id,

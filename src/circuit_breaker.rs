@@ -22,7 +22,11 @@ pub struct CircuitBreaker {
 }
 
 impl CircuitBreaker {
-    pub fn new(adapter: Arc<dyn ChainAdapter>, failure_threshold: u32, reset_timeout_secs: u64) -> Self {
+    pub fn new(
+        adapter: Arc<dyn ChainAdapter>,
+        failure_threshold: u32,
+        reset_timeout_secs: u64,
+    ) -> Self {
         Self {
             inner: adapter,
             state: Mutex::new(State::Closed { failures: 0 }),
@@ -31,11 +35,12 @@ impl CircuitBreaker {
         }
     }
 
+    #[allow(dead_code)]
     pub async fn circuit_status(&self) -> &'static str {
         match *self.state.lock().await {
             State::Closed { .. } => "closed",
-            State::Open { .. }   => "open",
-            State::HalfOpen      => "half_open",
+            State::Open { .. } => "open",
+            State::HalfOpen => "half_open",
         }
     }
 
@@ -74,14 +79,21 @@ impl CircuitBreaker {
                         failures = next,
                         "circuit opened"
                     );
-                    *state = State::Open { opened_at: Instant::now() };
+                    *state = State::Open {
+                        opened_at: Instant::now(),
+                    };
                 } else {
                     *state = State::Closed { failures: next };
                 }
             }
             State::HalfOpen => {
-                tracing::warn!(adapter = self.inner.name(), "probe failed, circuit re-opened");
-                *state = State::Open { opened_at: Instant::now() };
+                tracing::warn!(
+                    adapter = self.inner.name(),
+                    "probe failed, circuit re-opened"
+                );
+                *state = State::Open {
+                    opened_at: Instant::now(),
+                };
             }
             State::Open { .. } => {}
         }
@@ -93,16 +105,28 @@ impl ChainAdapter for CircuitBreaker {
     async fn submit(&self, payment: &Payment) -> Result<String, EngineError> {
         self.check_and_transition().await?;
         match self.inner.submit(payment).await {
-            Ok(hash) => { self.on_success().await; Ok(hash) }
-            Err(e)   => { self.on_failure().await; Err(e) }
+            Ok(hash) => {
+                self.on_success().await;
+                Ok(hash)
+            }
+            Err(e) => {
+                self.on_failure().await;
+                Err(e)
+            }
         }
     }
 
     async fn fee_estimate(&self) -> Result<FeeEstimate, EngineError> {
         self.check_and_transition().await?;
         match self.inner.fee_estimate().await {
-            Ok(f) => { self.on_success().await; Ok(f) }
-            Err(e) => { self.on_failure().await; Err(e) }
+            Ok(f) => {
+                self.on_success().await;
+                Ok(f)
+            }
+            Err(e) => {
+                self.on_failure().await;
+                Err(e)
+            }
         }
     }
 

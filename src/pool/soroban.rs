@@ -1,7 +1,7 @@
-use serde::{Deserialize, Serialize};
+use crate::utils::EngineError;
+use serde::Deserialize;
 use serde_json::{json, Value};
 use std::sync::atomic::{AtomicU64, Ordering};
-use crate::utils::EngineError;
 
 pub struct SorobanRpc {
     endpoint: String,
@@ -11,12 +11,15 @@ pub struct SorobanRpc {
 
 #[derive(Debug, Deserialize)]
 pub struct LedgerEntry {
+    #[allow(dead_code)]
     pub key: String,
     pub xdr: String,
     #[serde(rename = "lastModifiedLedgerSeq")]
+    #[allow(dead_code)]
     pub last_modified: Option<u32>,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 pub struct SimulateResult {
     pub results: Option<Vec<SimulateResultItem>>,
@@ -25,6 +28,7 @@ pub struct SimulateResult {
     pub latest_ledger: Option<u32>,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 pub struct SimulateResultItem {
     pub xdr: String,
@@ -46,7 +50,10 @@ impl SorobanRpc {
         self.id.fetch_add(1, Ordering::Relaxed)
     }
 
-    pub async fn get_ledger_entries(&self, keys: Vec<String>) -> Result<Vec<LedgerEntry>, EngineError> {
+    pub async fn get_ledger_entries(
+        &self,
+        keys: Vec<String>,
+    ) -> Result<Vec<LedgerEntry>, EngineError> {
         let body = json!({
             "jsonrpc": "2.0",
             "id": self.next_id(),
@@ -67,6 +74,7 @@ impl SorobanRpc {
         Ok(entries)
     }
 
+    #[allow(dead_code)]
     pub async fn simulate_transaction(&self, xdr: &str) -> Result<SimulateResult, EngineError> {
         let body = json!({
             "jsonrpc": "2.0",
@@ -81,6 +89,7 @@ impl SorobanRpc {
             .map_err(|e| EngineError::Internal(format!("parse simulate result: {e}")))
     }
 
+    #[allow(dead_code)]
     pub async fn get_latest_ledger(&self) -> Result<u32, EngineError> {
         let body = json!({
             "jsonrpc": "2.0",

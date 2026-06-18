@@ -17,16 +17,24 @@ mod webhook;
 
 use std::sync::Arc;
 
-use axum::{middleware as axum_middleware, routing::{delete, get, post, put}, Router};
+use axum::{
+    middleware as axum_middleware,
+    routing::{delete, get, post, put},
+    Router,
+};
 use tokio::net::TcpListener;
-use tower_http::{cors::{Any, CorsLayer}, trace::TraceLayer};
+use tower_http::{
+    cors::{Any, CorsLayer},
+    trace::TraceLayer,
+};
 
 use adapters::StellarAdapter;
 use api::{AppContext, AppState};
 use circuit_breaker::CircuitBreaker;
 use config::{Config, Network};
 use engine::Engine;
-use pool::{contract::ContractClient, soroban::SorobanRpc};
+use pool::contract::ContractClient;
+use pool::soroban::SorobanRpc;
 use rates::RateService;
 use retry::RetryConfig;
 use webhook::WebhookStore;
@@ -74,7 +82,9 @@ async fn main() {
     });
 
     if pool_client.is_none() {
-        tracing::warn!("SOROBAN_RPC_URL / POOL_CONTRACT_ID not set — pool endpoints will return 503");
+        tracing::warn!(
+            "SOROBAN_RPC_URL / POOL_CONTRACT_ID not set — pool endpoints will return 503"
+        );
     }
 
     let state: AppState = Arc::new(AppContext {
@@ -84,37 +94,58 @@ async fn main() {
         pool: pool_client,
     });
 
-    let cors = CorsLayer::new().allow_origin(Any).allow_methods(Any).allow_headers(Any);
+    let cors = CorsLayer::new()
+        .allow_origin(Any)
+        .allow_methods(Any)
+        .allow_headers(Any);
 
     let app = Router::new()
         // Health
-        .route("/healthz",                             get(api::health::healthz))
+        .route("/healthz", get(api::health::healthz))
         // Payments
-        .route("/api/v1/payments",                     post(api::payments::initiate).get(api::payments::list))
-        .route("/api/v1/payments/simulate",            post(api::payments::simulate))
-        .route("/api/v1/payments/batch",               post(api::batch::submit))
-        .route("/api/v1/payments/:id",                 get(api::payments::get))
-        .route("/api/v1/payments/:id/receipt",         get(api::payments::receipt))
+        .route(
+            "/api/v1/payments",
+            post(api::payments::initiate).get(api::payments::list),
+        )
+        .route("/api/v1/payments/simulate", post(api::payments::simulate))
+        .route("/api/v1/payments/batch", post(api::batch::submit))
+        .route("/api/v1/payments/:id", get(api::payments::get))
+        .route("/api/v1/payments/:id/receipt", get(api::payments::receipt))
         // Fees & Rates
-        .route("/api/v1/fees/current",                 get(api::fees::current))
-        .route("/api/v1/rates",                        get(api::rates::get))
+        .route("/api/v1/fees/current", get(api::fees::current))
+        .route("/api/v1/rates", get(api::rates::get))
         // AMM Pool — read
-        .route("/api/v1/pool/reserves",                         get(api::pool::reserves))
-        .route("/api/v1/pool/quote",                            get(api::pool::quote))
-        .route("/api/v1/pool/reverse-quote",                    get(api::pool::reverse_quote))
-        .route("/api/v1/pool/lp-balance",                       get(api::pool::lp_balance))
-        .route("/api/v1/pool/stats",                            get(api::pool::pool_stats))
+        .route("/api/v1/pool/reserves", get(api::pool::reserves))
+        .route("/api/v1/pool/quote", get(api::pool::quote))
+        .route("/api/v1/pool/reverse-quote", get(api::pool::reverse_quote))
+        .route("/api/v1/pool/lp-balance", get(api::pool::lp_balance))
+        .route("/api/v1/pool/stats", get(api::pool::pool_stats))
         // AMM Pool — simulation (pure math, no signing required)
-        .route("/api/v1/pool/simulate/add-liquidity",           get(api::pool::simulate_add_liquidity))
-        .route("/api/v1/pool/simulate/remove-liquidity",        get(api::pool::simulate_remove_liquidity))
+        .route(
+            "/api/v1/pool/simulate/add-liquidity",
+            get(api::pool::simulate_add_liquidity),
+        )
+        .route(
+            "/api/v1/pool/simulate/remove-liquidity",
+            get(api::pool::simulate_remove_liquidity),
+        )
         // AMM Pool — unsigned tx builders
-        .route("/api/v1/pool/build/swap",                       post(api::pool::build_swap))
-        .route("/api/v1/pool/build/add-liquidity",              post(api::pool::build_add_liquidity))
-        .route("/api/v1/pool/build/remove-liquidity",           post(api::pool::build_remove_liquidity))
+        .route("/api/v1/pool/build/swap", post(api::pool::build_swap))
+        .route(
+            "/api/v1/pool/build/add-liquidity",
+            post(api::pool::build_add_liquidity),
+        )
+        .route(
+            "/api/v1/pool/build/remove-liquidity",
+            post(api::pool::build_remove_liquidity),
+        )
         // Webhooks
-        .route("/api/v1/webhooks",                     post(api::webhooks::register).get(api::webhooks::list))
-        .route("/api/v1/webhooks/:id",                 delete(api::webhooks::delete))
-        .route("/api/v1/webhooks/:id/toggle",          put(api::webhooks::toggle))
+        .route(
+            "/api/v1/webhooks",
+            post(api::webhooks::register).get(api::webhooks::list),
+        )
+        .route("/api/v1/webhooks/:id", delete(api::webhooks::delete))
+        .route("/api/v1/webhooks/:id/toggle", put(api::webhooks::toggle))
         .layer(axum_middleware::from_fn(middleware::inject_request_id))
         .layer(TraceLayer::new_for_http())
         .layer(cors)

@@ -4,9 +4,11 @@ use std::env;
 pub struct Config {
     pub port: u16,
     pub network: Network,
+    #[allow(dead_code)]
     pub horizon_url: String,
     pub max_retry_attempts: u32,
     pub retry_initial_delay_ms: u64,
+    #[allow(dead_code)]
     pub webhook_timeout_secs: u64,
     pub pool: Option<PoolConfig>,
 }
@@ -44,20 +46,35 @@ impl Config {
             let t1 = env::var("POOL_TOKEN_1").ok();
 
             match (rpc, contract, t0, t1) {
-                (Some(rpc), Some(contract), Some(t0), Some(t1)) => {
-                    Some(PoolConfig { soroban_rpc_url: rpc, contract_id: contract, token_0: t0, token_1: t1 })
-                }
+                (Some(rpc), Some(contract), Some(t0), Some(t1)) => Some(PoolConfig {
+                    soroban_rpc_url: rpc,
+                    contract_id: contract,
+                    token_0: t0,
+                    token_1: t1,
+                }),
                 _ => None,
             }
         };
 
         Self {
-            port: env::var("PORT").ok().and_then(|v| v.parse().ok()).unwrap_or(8080),
+            port: env::var("PORT")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(8080),
             network,
             horizon_url,
-            max_retry_attempts: env::var("MAX_RETRY_ATTEMPTS").ok().and_then(|v| v.parse().ok()).unwrap_or(3),
-            retry_initial_delay_ms: env::var("RETRY_INITIAL_DELAY_MS").ok().and_then(|v| v.parse().ok()).unwrap_or(500),
-            webhook_timeout_secs: env::var("WEBHOOK_TIMEOUT_SECS").ok().and_then(|v| v.parse().ok()).unwrap_or(5),
+            max_retry_attempts: env::var("MAX_RETRY_ATTEMPTS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(3),
+            retry_initial_delay_ms: env::var("RETRY_INITIAL_DELAY_MS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(500),
+            webhook_timeout_secs: env::var("WEBHOOK_TIMEOUT_SECS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(5),
             pool,
         }
     }

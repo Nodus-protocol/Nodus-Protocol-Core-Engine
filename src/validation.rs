@@ -1,9 +1,7 @@
 use crate::utils::EngineError;
 
 pub fn stellar_address(addr: &str) -> Result<(), EngineError> {
-    if addr.len() == 56
-        && addr.starts_with('G')
-        && addr.chars().all(|c| c.is_ascii_alphanumeric())
+    if addr.len() == 56 && addr.starts_with('G') && addr.chars().all(|c| c.is_ascii_alphanumeric())
     {
         Ok(())
     } else {
@@ -15,7 +13,9 @@ pub fn stellar_address(addr: &str) -> Result<(), EngineError> {
 
 pub fn amount(amount: u64) -> Result<(), EngineError> {
     if amount == 0 {
-        Err(EngineError::InvalidRequest("amount must be greater than 0".into()))
+        Err(EngineError::InvalidRequest(
+            "amount must be greater than 0".into(),
+        ))
     } else {
         Ok(())
     }
@@ -23,7 +23,9 @@ pub fn amount(amount: u64) -> Result<(), EngineError> {
 
 pub fn token(token: &str) -> Result<(), EngineError> {
     if token.is_empty() || token.len() > 12 || !token.chars().all(|c| c.is_ascii_alphanumeric()) {
-        Err(EngineError::InvalidRequest(format!("invalid token symbol '{token}'")))
+        Err(EngineError::InvalidRequest(format!(
+            "invalid token symbol '{token}'"
+        )))
     } else {
         Ok(())
     }

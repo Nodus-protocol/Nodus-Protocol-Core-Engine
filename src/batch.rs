@@ -32,14 +32,19 @@ pub struct BatchResult {
     pub results: Vec<BatchItemResult>,
 }
 
-pub async fn process_batch(engine: Arc<Engine>, items: Vec<BatchItem>) -> Result<BatchResult, EngineError> {
+pub async fn process_batch(
+    engine: Arc<Engine>,
+    items: Vec<BatchItem>,
+) -> Result<BatchResult, EngineError> {
     if items.is_empty() {
-        return Err(EngineError::InvalidRequest("batch must have at least 1 item".into()));
+        return Err(EngineError::InvalidRequest(
+            "batch must have at least 1 item".into(),
+        ));
     }
     if items.len() > MAX_BATCH {
-        return Err(EngineError::InvalidRequest(
-            format!("batch exceeds maximum of {MAX_BATCH} items"),
-        ));
+        return Err(EngineError::InvalidRequest(format!(
+            "batch exceeds maximum of {MAX_BATCH} items"
+        )));
     }
 
     let total = items.len();
@@ -49,7 +54,13 @@ pub async fn process_batch(engine: Arc<Engine>, items: Vec<BatchItem>) -> Result
         let eng = engine.clone();
         set.spawn(async move {
             let result = eng
-                .initiate(item.sender, item.recipient, item.amount, item.token, item.urgency)
+                .initiate(
+                    item.sender,
+                    item.recipient,
+                    item.amount,
+                    item.token,
+                    item.urgency,
+                )
                 .await;
             (i, result)
         });
@@ -63,16 +74,29 @@ pub async fn process_batch(engine: Arc<Engine>, items: Vec<BatchItem>) -> Result
         match outcome {
             Ok(payment) => {
                 succeeded += 1;
-                results.push(BatchItemResult { index, payment: Some(payment), error: None });
+                results.push(BatchItemResult {
+                    index,
+                    payment: Some(payment),
+                    error: None,
+                });
             }
             Err(e) => {
                 failed += 1;
-                results.push(BatchItemResult { index, payment: None, error: Some(e.to_string()) });
+                results.push(BatchItemResult {
+                    index,
+                    payment: None,
+                    error: Some(e.to_string()),
+                });
             }
         }
     }
 
     results.sort_by_key(|r| r.index);
 
-    Ok(BatchResult { total, succeeded, failed, results })
+    Ok(BatchResult {
+        total,
+        succeeded,
+        failed,
+        results,
+    })
 }

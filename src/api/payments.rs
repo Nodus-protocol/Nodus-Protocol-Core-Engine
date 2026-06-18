@@ -16,13 +16,20 @@ impl IntoResponse for EngineError {
             _ => StatusCode::INTERNAL_SERVER_ERROR,
         };
         let code = match &self {
-            EngineError::NotFound(_)       => "NOT_FOUND",
+            EngineError::NotFound(_) => "NOT_FOUND",
             EngineError::InvalidRequest(_) => "INVALID_REQUEST",
-            EngineError::AdapterError(_)   => "ADAPTER_ERROR",
-            EngineError::NetworkError(_)   => "NETWORK_ERROR",
-            EngineError::Internal(_)       => "INTERNAL_ERROR",
+            EngineError::AdapterError(_) => "ADAPTER_ERROR",
+            EngineError::NetworkError(_) => "NETWORK_ERROR",
+            EngineError::Internal(_) => "INTERNAL_ERROR",
         };
-        (status, Json(ApiError { code, message: self.to_string() })).into_response()
+        (
+            status,
+            Json(ApiError {
+                code,
+                message: self.to_string(),
+            }),
+        )
+            .into_response()
     }
 }
 
@@ -49,7 +56,13 @@ pub async fn initiate(
 
     let payment = ctx
         .engine
-        .initiate(req.sender, req.recipient, req.amount, req.token, req.urgency)
+        .initiate(
+            req.sender,
+            req.recipient,
+            req.amount,
+            req.token,
+            req.urgency,
+        )
         .await?;
 
     if let Some(key) = req.idempotency_key {
@@ -88,7 +101,13 @@ pub async fn simulate(
 ) -> Result<impl IntoResponse, EngineError> {
     let result = ctx
         .engine
-        .simulate(req.sender, req.recipient, req.amount, req.token, req.urgency)
+        .simulate(
+            req.sender,
+            req.recipient,
+            req.amount,
+            req.token,
+            req.urgency,
+        )
         .await?;
     Ok(Json(result))
 }

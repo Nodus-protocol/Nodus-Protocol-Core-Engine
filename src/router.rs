@@ -1,6 +1,6 @@
-use std::sync::Arc;
 use crate::adapters::ChainAdapter;
 use crate::utils::{EngineError, FeeEstimate, Urgency};
+use std::sync::Arc;
 
 pub struct RouteOption {
     pub adapter: Arc<dyn ChainAdapter>,
@@ -46,10 +46,16 @@ impl Router {
         }
 
         if candidates.is_empty() {
-            return Err(EngineError::AdapterError("all chain adapters are unavailable".into()));
+            return Err(EngineError::AdapterError(
+                "all chain adapters are unavailable".into(),
+            ));
         }
 
-        candidates.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+        candidates.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         Ok(candidates.remove(0))
     }
 
@@ -70,15 +76,15 @@ impl Router {
 fn fee_for_urgency(fees: &FeeEstimate, urgency: &Urgency) -> (u64, u32) {
     match urgency {
         Urgency::Standard => (fees.standard_stroops, fees.standard_seconds),
-        Urgency::Fast     => (fees.fast_stroops,     fees.fast_seconds),
-        Urgency::Urgent   => (fees.urgent_stroops,   fees.urgent_seconds),
+        Urgency::Fast => (fees.fast_stroops, fees.fast_seconds),
+        Urgency::Urgent => (fees.urgent_stroops, fees.urgent_seconds),
     }
 }
 
 fn score(fee_stroops: u64, secs: u32, urgency: &Urgency) -> f64 {
     let latency_weight = match urgency {
-        Urgency::Urgent   => 5.0,
-        Urgency::Fast     => 2.0,
+        Urgency::Urgent => 5.0,
+        Urgency::Fast => 2.0,
         Urgency::Standard => 0.5,
     };
     let fee_cost = fee_stroops as f64 / 100.0;
