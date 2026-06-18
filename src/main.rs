@@ -65,9 +65,9 @@ async fn main() {
 
     let stellar = Arc::new(CircuitBreaker::new(stellar_raw, 5, 30));
     let retry_config = RetryConfig::new(cfg.max_retry_attempts, cfg.retry_initial_delay_ms);
-    let idempotency = idempotency::create_idempotency_store(
+    let (idempotency, _eviction_task) = idempotency::create_idempotency_store(
         cfg.redis_url.as_deref(),
-        Duration::from_secs(86_400),
+        Duration::from_secs(cfg.idempotency_ttl_secs),
     )
     .await;
     let engine = Arc::new(Engine::new(vec![stellar], retry_config, idempotency));

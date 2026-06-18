@@ -80,7 +80,6 @@ impl MemoryIdempotencyStore {
         }
     }
 
-    #[allow(dead_code)]
     pub fn evict_expired(&self) {
         self.entries.retain(|_, v| v.stored_at.elapsed() < self.ttl);
     }
@@ -113,23 +112,42 @@ impl IdempotencyStore for MemoryIdempotencyStore {
 pub async fn create_idempotency_store(
     redis_url: Option<&str>,
     ttl: Duration,
-) -> Arc<dyn IdempotencyStore> {
+) -> (Arc<dyn IdempotencyStore>, tokio::task::JoinHandle<()>) {
     match redis_url {
         Some(url) => match RedisIdempotencyStore::new(url, ttl).await {
             Ok(store) => {
                 tracing::info!("idempotency store: redis");
-                Arc::new(store)
+                let noop = tokio::spawn(async {});
+                (Arc::new(store), noop)
             }
             Err(e) => {
                 tracing::warn!(error = %e, "redis unavailable, falling back to in-memory idempotency store");
-                Arc::new(MemoryIdempotencyStore::new(ttl))
+                let store = Arc::new(MemoryIdempotencyStore::new(ttl));
+                let handle = spawn_memory_eviction(store.clone(), ttl);
+                (store, handle)
             }
         },
         None => {
             tracing::info!("idempotency store: in-memory (keys lost on restart)");
-            Arc::new(MemoryIdempotencyStore::new(ttl))
+            let store = Arc::new(MemoryIdempotencyStore::new(ttl));
+            let handle = spawn_memory_eviction(store.clone(), ttl);
+            (store, handle)
         }
     }
+}
+
+fn spawn_memory_eviction(
+    store: Arc<MemoryIdempotencyStore>,
+    ttl: Duration,
+) -> tokio::task::JoinHandle<()> {
+    let interval = ttl / 4;
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(interval);
+        loop {
+            ticker.tick().await;
+            store.evict_expired();
+        }
+    })
 }
 
 #[cfg(test)]
