@@ -5,6 +5,10 @@ edition = "2021"
 description = "Core payment processing engine for the Nodus Protocol"
 license = "MIT"
 
+[lib]
+name = "nodus_core_engine"
+path = "src/lib.rs"
+
 [[bin]]
 name = "nodus-core-engine"
 path = "src/main.rs"

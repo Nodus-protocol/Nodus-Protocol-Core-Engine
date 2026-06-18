@@ -171,7 +171,7 @@ pub async fn simulate_remove_liquidity(
     )
     .map_err(|e| EngineError::InvalidRequest(e.to_string()))?;
 
-    let share_bps = ((lp_balance as u128 * 10_000) / reserves.lp_total_supply) as u64;
+    let share_bps = ((lp_balance * 10_000) / reserves.lp_total_supply) as u64;
 
     Ok(Json(serde_json::json!({
         "address":           q.address,
@@ -203,16 +203,12 @@ pub async fn simulate_add_liquidity(
     .map_err(|e| EngineError::InvalidRequest(e.to_string()))?;
 
     // Optimal amounts respect the current ratio; the smaller side dictates LP minted.
-    let optimal_amount_0 = if reserves.reserve_1 > 0 {
-        (q.amount_1 as u128 * reserves.reserve_0) / reserves.reserve_1
-    } else {
-        q.amount_0
-    };
-    let optimal_amount_1 = if reserves.reserve_0 > 0 {
-        (q.amount_0 as u128 * reserves.reserve_1) / reserves.reserve_0
-    } else {
-        q.amount_1
-    };
+    let optimal_amount_0 = (q.amount_1 * reserves.reserve_0)
+        .checked_div(reserves.reserve_1)
+        .unwrap_or(q.amount_0);
+    let optimal_amount_1 = (q.amount_0 * reserves.reserve_1)
+        .checked_div(reserves.reserve_0)
+        .unwrap_or(q.amount_1);
 
     Ok(Json(serde_json::json!({
         "lp_tokens_minted":   lp_minted.to_string(),
@@ -238,10 +234,7 @@ pub async fn pool_stats(State(ctx): State<AppState>) -> Result<impl IntoResponse
     } else {
         0.0
     };
-    let k = reserves
-        .reserve_0
-        .checked_mul(reserves.reserve_1)
-        .unwrap_or(u128::MAX);
+    let k = reserves.reserve_0.saturating_mul(reserves.reserve_1);
 
     Ok(Json(serde_json::json!({
         "reserves":              reserves,
@@ -327,6 +320,7 @@ pub async fn build_remove_liquidity(
     )))
 }
 
+#[allow(dead_code)]
 pub async fn not_configured() -> impl IntoResponse {
     (
         StatusCode::SERVICE_UNAVAILABLE,

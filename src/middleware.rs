@@ -2,7 +2,7 @@ use axum::{extract::Request, middleware::Next, response::Response};
 use uuid::Uuid;
 
 #[derive(Clone)]
-pub struct RequestId(pub String);
+pub struct RequestId(#[allow(dead_code)] pub String);
 
 pub async fn inject_request_id(mut req: Request, next: Next) -> Response {
     let id = req

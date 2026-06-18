@@ -37,6 +37,7 @@ impl IdempotencyStore {
         );
     }
 
+    #[allow(dead_code)]
     pub fn evict_expired(&self) {
         self.0.retain(|_, v| v.stored_at.elapsed() < TTL);
     }

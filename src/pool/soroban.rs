@@ -1,5 +1,5 @@
 use crate::utils::EngineError;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use serde_json::{json, Value};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -11,12 +11,15 @@ pub struct SorobanRpc {
 
 #[derive(Debug, Deserialize)]
 pub struct LedgerEntry {
+    #[allow(dead_code)]
     pub key: String,
     pub xdr: String,
     #[serde(rename = "lastModifiedLedgerSeq")]
+    #[allow(dead_code)]
     pub last_modified: Option<u32>,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 pub struct SimulateResult {
     pub results: Option<Vec<SimulateResultItem>>,
@@ -25,6 +28,7 @@ pub struct SimulateResult {
     pub latest_ledger: Option<u32>,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 pub struct SimulateResultItem {
     pub xdr: String,
@@ -70,6 +74,7 @@ impl SorobanRpc {
         Ok(entries)
     }
 
+    #[allow(dead_code)]
     pub async fn simulate_transaction(&self, xdr: &str) -> Result<SimulateResult, EngineError> {
         let body = json!({
             "jsonrpc": "2.0",
@@ -84,6 +89,7 @@ impl SorobanRpc {
             .map_err(|e| EngineError::Internal(format!("parse simulate result: {e}")))
     }
 
+    #[allow(dead_code)]
     pub async fn get_latest_ledger(&self) -> Result<u32, EngineError> {
         let body = json!({
             "jsonrpc": "2.0",

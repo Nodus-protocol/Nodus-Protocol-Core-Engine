@@ -16,6 +16,12 @@ pub struct RateService {
     client: reqwest::Client,
 }
 
+impl Default for RateService {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl RateService {
     pub fn new() -> Self {
         Self {
@@ -47,6 +53,7 @@ impl RateService {
         Ok(price)
     }
 
+    #[allow(dead_code)]
     pub async fn convert(
         &self,
         amount: u64,

@@ -35,6 +35,7 @@ impl CircuitBreaker {
         }
     }
 
+    #[allow(dead_code)]
     pub async fn circuit_status(&self) -> &'static str {
         match *self.state.lock().await {
             State::Closed { .. } => "closed",

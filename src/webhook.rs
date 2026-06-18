@@ -6,8 +6,10 @@ use uuid::Uuid;
 
 use crate::utils::{now_utc, EngineError, Payment};
 
+#[allow(dead_code)]
 type HmacSha256 = Hmac<Sha256>;
 
+#[allow(clippy::enum_variant_names)]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WebhookEvent {
@@ -17,6 +19,7 @@ pub enum WebhookEvent {
 }
 
 impl WebhookEvent {
+    #[allow(dead_code)]
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::PaymentConfirmed => "payment.confirmed",
@@ -31,12 +34,14 @@ pub struct Webhook {
     pub id: String,
     pub url: String,
     #[serde(skip_serializing)]
+    #[allow(dead_code)]
     pub secret: String,
     pub events: Vec<WebhookEvent>,
     pub active: bool,
     pub created_at: String,
 }
 
+#[allow(dead_code)]
 #[derive(Serialize)]
 struct Payload<'a> {
     event: &'static str,
@@ -46,7 +51,14 @@ struct Payload<'a> {
 
 pub struct WebhookStore {
     hooks: DashMap<String, Webhook>,
+    #[allow(dead_code)]
     client: reqwest::Client,
+}
+
+impl Default for WebhookStore {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl WebhookStore {
@@ -98,6 +110,7 @@ impl WebhookStore {
         Ok(())
     }
 
+    #[allow(dead_code)]
     pub async fn dispatch(&self, event: WebhookEvent, payment: &Payment) {
         let event_str = event.as_str();
 
@@ -142,6 +155,7 @@ impl WebhookStore {
     }
 }
 
+#[allow(dead_code)]
 fn hmac_sign(secret: &str, body: &str) -> String {
     let mut mac = HmacSha256::new_from_slice(secret.as_bytes()).expect("HMAC accepts any key size");
     mac.update(body.as_bytes());

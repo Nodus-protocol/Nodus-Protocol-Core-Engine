@@ -28,6 +28,11 @@ impl PaymentStore {
         self.0.len()
     }
 
+    #[allow(dead_code)]
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
     pub fn set_status(&self, id: &str, status: PaymentStatus) -> Result<(), EngineError> {
         let mut payment = self.get(id)?;
         payment.status = status;

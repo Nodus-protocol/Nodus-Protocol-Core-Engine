@@ -6,7 +6,7 @@ use crate::idempotency::IdempotencyStore;
 use crate::retry::{retry, RetryConfig};
 use crate::router::Router;
 use crate::store::PaymentStore;
-use crate::utils::{now_utc, EngineError, FeeEstimate, Payment, PaymentStatus, Urgency};
+use crate::utils::{now_utc, EngineError, Payment, PaymentStatus, Urgency};
 use crate::validation;
 
 pub struct Engine {

@@ -71,7 +71,7 @@ impl ChainAdapter for StellarAdapter {
                     stats[key][sub]
                         .as_str()
                         .and_then(|s| s.parse().ok())
-                        .unwrap_or_else(|| match sub {
+                        .unwrap_or(match sub {
                             "p50" => 100,
                             "p75" => 250,
                             "p90" => 500,

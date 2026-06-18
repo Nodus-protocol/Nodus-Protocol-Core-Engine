@@ -4,9 +4,11 @@ use std::env;
 pub struct Config {
     pub port: u16,
     pub network: Network,
+    #[allow(dead_code)]
     pub horizon_url: String,
     pub max_retry_attempts: u32,
     pub retry_initial_delay_ms: u64,
+    #[allow(dead_code)]
     pub webhook_timeout_secs: u64,
     pub pool: Option<PoolConfig>,
 }

@@ -158,6 +158,7 @@ impl ContractClient {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn build_add_liquidity_params(
         &self,
         from: &str,
@@ -276,7 +277,7 @@ fn parse_contract_id(id: &str) -> Result<Vec<u8>, EngineError> {
 fn pad4(buf: &mut Vec<u8>, len: usize) {
     let rem = len % 4;
     if rem != 0 {
-        buf.extend(std::iter::repeat(0u8).take(4 - rem));
+        buf.extend(std::iter::repeat_n(0u8, 4 - rem));
     }
 }
 
