@@ -22,12 +22,15 @@ jobs:
       - name: Verify fee constants match smart contract
         run: |
           curl -sf https://raw.githubusercontent.com/Nodus-protocol/Nodus-Protocol-Smart-Contract/main/src/math.rs -o /tmp/sc_math.rs
-          SC_FEE_NUM=$(grep 'FEE_NUMERATOR' /tmp/sc_math.rs | grep -o '[0-9_]*' | tr -d '_')
-          SC_FEE_DEN=$(grep 'FEE_DENOMINATOR' /tmp/sc_math.rs | grep -o '[0-9_]*' | tr -d '_')
-          SC_MIN_LIQ=$(grep 'MINIMUM_LIQUIDITY' /tmp/sc_math.rs | grep -o '[0-9_]*' | tr -d '_')
-          CE_FEE_NUM=$(grep 'FEE_NUMERATOR' src/pool/math.rs | grep -o '[0-9_]*' | tr -d '_')
-          CE_FEE_DEN=$(grep 'FEE_DENOMINATOR' src/pool/math.rs | grep -o '[0-9_]*' | tr -d '_')
-          CE_MIN_LIQ=$(grep 'MINIMUM_LIQUIDITY' src/pool/math.rs | grep -o '[0-9_]*' | tr -d '_')
+          extract_value() {
+            grep -E "^\s*pub const ${1}:" "$2" | sed -E 's/.*=\s*([0-9_]+)\s*;.*/\1/' | tr -d '_'
+          }
+          SC_FEE_NUM=$(extract_value FEE_NUMERATOR /tmp/sc_math.rs)
+          SC_FEE_DEN=$(extract_value FEE_DENOMINATOR /tmp/sc_math.rs)
+          SC_MIN_LIQ=$(extract_value MINIMUM_LIQUIDITY /tmp/sc_math.rs)
+          CE_FEE_NUM=$(extract_value FEE_NUMERATOR src/pool/math.rs)
+          CE_FEE_DEN=$(extract_value FEE_DENOMINATOR src/pool/math.rs)
+          CE_MIN_LIQ=$(extract_value MINIMUM_LIQUIDITY src/pool/math.rs)
           echo "Smart Contract: FEE_NUMERATOR=$SC_FEE_NUM FEE_DENOMINATOR=$SC_FEE_DEN MINIMUM_LIQUIDITY=$SC_MIN_LIQ"
           echo "Core Engine:    FEE_NUMERATOR=$CE_FEE_NUM FEE_DENOMINATOR=$CE_FEE_DEN MINIMUM_LIQUIDITY=$CE_MIN_LIQ"
           FAIL=0
