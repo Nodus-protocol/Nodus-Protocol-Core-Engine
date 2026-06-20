@@ -1,33 +1,54 @@
 name: CI
-
 on:
   push:
     branches: [main]
   pull_request:
     branches: [main]
-
 jobs:
   ci:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
-
       - name: Cache
         uses: Swatinem/rust-cache@v2
-
       - name: Format check
         run: cargo fmt --all -- --check
-
       - name: Clippy
         run: cargo clippy --all-targets --all-features -- -D warnings
-
+      - name: Verify fee constants match smart contract
+        run: |
+          curl -sf https://raw.githubusercontent.com/Nodus-protocol/Nodus-Protocol-Smart-Contract/main/src/math.rs -o /tmp/sc_math.rs
+          SC_FEE_NUM=$(grep 'FEE_NUMERATOR' /tmp/sc_math.rs | grep -o '[0-9_]*' | tr -d '_')
+          SC_FEE_DEN=$(grep 'FEE_DENOMINATOR' /tmp/sc_math.rs | grep -o '[0-9_]*' | tr -d '_')
+          SC_MIN_LIQ=$(grep 'MINIMUM_LIQUIDITY' /tmp/sc_math.rs | grep -o '[0-9_]*' | tr -d '_')
+          CE_FEE_NUM=$(grep 'FEE_NUMERATOR' src/pool/math.rs | grep -o '[0-9_]*' | tr -d '_')
+          CE_FEE_DEN=$(grep 'FEE_DENOMINATOR' src/pool/math.rs | grep -o '[0-9_]*' | tr -d '_')
+          CE_MIN_LIQ=$(grep 'MINIMUM_LIQUIDITY' src/pool/math.rs | grep -o '[0-9_]*' | tr -d '_')
+          echo "Smart Contract: FEE_NUMERATOR=$SC_FEE_NUM FEE_DENOMINATOR=$SC_FEE_DEN MINIMUM_LIQUIDITY=$SC_MIN_LIQ"
+          echo "Core Engine:    FEE_NUMERATOR=$CE_FEE_NUM FEE_DENOMINATOR=$CE_FEE_DEN MINIMUM_LIQUIDITY=$CE_MIN_LIQ"
+          FAIL=0
+          if [ "$SC_FEE_NUM" != "$CE_FEE_NUM" ]; then
+            echo "::error::FEE_NUMERATOR mismatch: SmartContract=$SC_FEE_NUM CoreEngine=$CE_FEE_NUM"
+            FAIL=1
+          fi
+          if [ "$SC_FEE_DEN" != "$CE_FEE_DEN" ]; then
+            echo "::error::FEE_DENOMINATOR mismatch: SmartContract=$SC_FEE_DEN CoreEngine=$CE_FEE_DEN"
+            FAIL=1
+          fi
+          if [ "$SC_MIN_LIQ" != "$CE_MIN_LIQ" ]; then
+            echo "::error::MINIMUM_LIQUIDITY mismatch: SmartContract=$SC_MIN_LIQ CoreEngine=$CE_MIN_LIQ"
+            FAIL=1
+          fi
+          if [ "$FAIL" = "1" ]; then
+            echo "AMM constants have drifted between Smart Contract and Core Engine repos. Update src/pool/math.rs to match src/math.rs in Nodus-Protocol-Smart-Contract."
+            exit 1
+          fi
+          echo "AMM constants verified in sync with Smart Contract."
       - name: Test
         run: cargo test --all-features
-
       - name: Build
         run: cargo build --release

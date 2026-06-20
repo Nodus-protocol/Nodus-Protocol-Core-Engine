@@ -1,5 +1,18 @@
 // AMM constant-product math — mirrors src/math.rs in the Smart Contract repo.
-// Any formula change in the contract must be reflected here.
+//
+// SYNCHRONIZATION WARNING:
+// These constants MUST match `src/math.rs` in the Nodus-Protocol-Smart-Contract
+// repository exactly. CI verifies this automatically (see
+// .github/workflows/ci.yml, "Verify fee constants match smart contract" step),
+// which fetches the live Smart Contract source and fails the build on drift.
+//
+// If you change a value here, you must also change it in the Smart Contract
+// repo in the same release cycle, or swap quotes from this engine will not
+// match what the deployed contract actually executes.
+//
+// Tracking: see https://github.com/Nodus-protocol/Nodus-Protocol-Core-Engine/issues/61
+// for the longer-term fix (a shared `nodus-amm-types` crate that both repos
+// depend on, eliminating this manual sync requirement entirely).
 
 pub const FEE_NUMERATOR: u128 = 997;
 pub const FEE_DENOMINATOR: u128 = 1_000;
@@ -170,5 +183,26 @@ mod tests {
         let small = price_impact_bps(100, 1_000_000);
         let large = price_impact_bps(500_000, 1_000_000);
         assert!(large > small);
+    }
+
+    /// Defense-in-depth: pins the expected constant values directly in a test,
+    /// so a local `cargo test` run (not just CI's network-dependent fetch step)
+    /// catches an accidental change to these numbers before it's committed.
+    /// If you are intentionally changing the fee, update this test AND the
+    /// Smart Contract repo's src/math.rs in the same PR/release.
+    #[test]
+    fn fee_constants_match_known_smart_contract_values() {
+        assert_eq!(
+            FEE_NUMERATOR, 997,
+            "FEE_NUMERATOR must match Smart Contract src/math.rs"
+        );
+        assert_eq!(
+            FEE_DENOMINATOR, 1_000,
+            "FEE_DENOMINATOR must match Smart Contract src/math.rs"
+        );
+        assert_eq!(
+            MINIMUM_LIQUIDITY, 1_000,
+            "MINIMUM_LIQUIDITY must match Smart Contract src/math.rs"
+        );
     }
 }
