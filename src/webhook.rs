@@ -2,6 +2,7 @@ use dashmap::DashMap;
 use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
+use std::time::{SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 
 use crate::utils::{now_utc, EngineError, Payment};
@@ -133,13 +134,19 @@ impl WebhookStore {
                 }
             };
 
-            let sig = hmac_sign(&hook.secret, &body);
+            let timestamp = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_secs();
+
+            let signed_payload = format!("t={}\n{}", timestamp, body);
+            let sig = hmac_sign(&hook.secret, &signed_payload);
 
             match self
                 .client
                 .post(&hook.url)
                 .header("content-type", "application/json")
-                .header("x-nodus-signature", &sig)
+                .header("x-nodus-signature", format!("t={},v1={}", timestamp, sig))
                 .body(body)
                 .send()
                 .await
