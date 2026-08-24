@@ -147,8 +147,10 @@ async fn idempotency_returns_cached_response() {
 }
 
 #[tokio::test]
-async fn health_reports_ok_with_working_adapter() {
+async fn readiness_requires_a_durable_store() {
     let engine = engine_with_mock(MockAdapter::new("mock"));
     let health = engine.health().await;
-    assert_eq!(health.status, "ok");
+    assert_eq!(health.status, "not_ready");
+    assert!(health.provider_ready);
+    assert!(!health.durable_store_ready);
 }

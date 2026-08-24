@@ -6,6 +6,7 @@ mod config;
 mod engine;
 mod idempotency;
 mod middleware;
+mod observability;
 mod pool;
 mod rates;
 mod retry;
@@ -51,15 +52,33 @@ async fn main() {
         .init();
 
     let cfg = Config::from_env();
+    observability::init(observability::Identity {
+        network: match cfg.network {
+            Network::Mainnet => "mainnet",
+            Network::Testnet => "testnet",
+        }
+        .into(),
+        provider: reqwest::Url::parse(&cfg.horizon_url)
+            .ok()
+            .and_then(|url| url.host_str().map(str::to_owned))
+            .unwrap_or_else(|| "unknown".into()),
+        release: cfg.release.clone(),
+        manifest: cfg.manifest.clone(),
+        contract: cfg.contract_spec.clone(),
+    });
+    observability::gauge(
+        "nodus_reconciliation_lag_seconds",
+        cfg.reconciliation_lag_seconds as f64,
+    );
 
     let stellar_raw: Arc<dyn adapters::ChainAdapter> = match cfg.network {
         Network::Mainnet => {
             tracing::info!("network: Stellar Mainnet");
-            Arc::new(StellarAdapter::mainnet())
+            Arc::new(StellarAdapter::new(&cfg.horizon_url))
         }
         Network::Testnet => {
             tracing::info!("network: Stellar Testnet");
-            Arc::new(StellarAdapter::testnet())
+            Arc::new(StellarAdapter::new(&cfg.horizon_url))
         }
     };
 
@@ -99,6 +118,7 @@ async fn main() {
         rates,
         webhooks,
         pool: pool_client,
+        config: cfg.clone(),
     });
 
     let cors = CorsLayer::new()
@@ -109,6 +129,8 @@ async fn main() {
     let app = Router::new()
         // Health
         .route("/healthz", get(api::health::healthz))
+        .route("/readyz", get(api::health::readyz))
+        .route("/metrics", get(api::health::metrics))
         // Payments
         .route(
             "/api/v1/payments",

@@ -66,12 +66,24 @@ impl ContractClient {
             let guard = self.cache.read().await;
             if let Some(ref c) = *guard {
                 if c.fetched_at.elapsed() < CACHE_TTL {
+                    crate::observability::gauge(
+                        "nodus_quote_cache_hit_age_seconds",
+                        c.fetched_at.elapsed().as_secs_f64(),
+                    );
                     return Ok(c.data.clone());
                 }
             }
         }
 
         let reserves = self.fetch_reserves().await?;
+        crate::observability::gauge(
+            "nodus_quote_age_seconds",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs()
+                .saturating_sub(reserves.timestamp_last) as f64,
+        );
 
         let mut guard = self.cache.write().await;
         *guard = Some(CachedReserves {
@@ -217,6 +229,10 @@ impl ContractClient {
             return Err(EngineError::NotFound("contract instance not found".into()));
         }
 
+        if let Some(ledger) = entries[0].last_modified {
+            crate::observability::gauge("nodus_quote_source_ledger", ledger as f64);
+        }
+        crate::observability::gauge("nodus_provider_divergence_ledgers", 0.0);
         parse_instance_storage(&entries[0].xdr, &self.token_0, &self.token_1)
     }
 

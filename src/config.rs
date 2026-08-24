@@ -13,9 +13,17 @@ pub struct Config {
     pub pool: Option<PoolConfig>,
     pub redis_url: Option<String>,
     pub idempotency_ttl_secs: u64,
+    pub release: String,
+    pub manifest: String,
+    pub expected_manifest: String,
+    pub contract_spec: String,
+    pub supported_contract_spec: String,
+    pub expected_network: Network,
+    pub reconciliation_lag_seconds: u64,
+    pub reconciliation_lag_max_seconds: u64,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Network {
     Mainnet,
     Testnet,
@@ -83,6 +91,82 @@ impl Config {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(86_400),
+            release: env::var("RELEASE_VERSION").unwrap_or_else(|_| "unknown".into()),
+            manifest: env::var("RELEASE_MANIFEST_SHA").unwrap_or_default(),
+            expected_manifest: env::var("EXPECTED_MANIFEST_SHA").unwrap_or_default(),
+            contract_spec: env::var("CONTRACT_SPEC_VERSION").unwrap_or_default(),
+            supported_contract_spec: env::var("SUPPORTED_CONTRACT_SPEC_VERSION")
+                .unwrap_or_default(),
+            expected_network: match env::var("EXPECTED_NETWORK").unwrap_or_default().as_str() {
+                "mainnet" => Network::Mainnet,
+                _ => Network::Testnet,
+            },
+            reconciliation_lag_seconds: env::var("RECONCILIATION_LAG_SECONDS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(u64::MAX),
+            reconciliation_lag_max_seconds: env::var("RECONCILIATION_LAG_MAX_SECONDS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(30),
         }
+    }
+
+    pub fn static_readiness(&self) -> Vec<&'static str> {
+        let mut failures = Vec::new();
+        if self.network != self.expected_network {
+            failures.push("wrong_network");
+        }
+        if self.manifest.is_empty() || self.manifest != self.expected_manifest {
+            failures.push("wrong_manifest");
+        }
+        if self.contract_spec.is_empty() || self.contract_spec != self.supported_contract_spec {
+            failures.push("unsupported_contract_spec");
+        }
+        if self.pool.is_none() {
+            failures.push("contract_not_configured");
+        }
+        if self.reconciliation_lag_seconds > self.reconciliation_lag_max_seconds {
+            failures.push("reconciliation_backlog");
+        }
+        failures
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn readiness_rejects_identity_and_contract_mismatches() {
+        let config = Config {
+            port: 8080,
+            network: Network::Mainnet,
+            horizon_url: String::new(),
+            max_retry_attempts: 1,
+            retry_initial_delay_ms: 1,
+            webhook_timeout_secs: 1,
+            pool: None,
+            redis_url: None,
+            idempotency_ttl_secs: 1,
+            release: "v1".into(),
+            manifest: "actual".into(),
+            expected_manifest: "expected".into(),
+            contract_spec: "2".into(),
+            supported_contract_spec: "1".into(),
+            expected_network: Network::Testnet,
+            reconciliation_lag_seconds: 31,
+            reconciliation_lag_max_seconds: 30,
+        };
+        assert_eq!(
+            config.static_readiness(),
+            vec![
+                "wrong_network",
+                "wrong_manifest",
+                "unsupported_contract_spec",
+                "contract_not_configured",
+                "reconciliation_backlog",
+            ]
+        );
     }
 }

@@ -6,6 +6,7 @@ pub mod config;
 pub mod engine;
 pub mod idempotency;
 pub mod middleware;
+pub mod observability;
 pub mod pool;
 pub mod rates;
 pub mod retry;

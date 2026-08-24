@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::time::Instant;
 use uuid::Uuid;
 
 use crate::adapters::ChainAdapter;
@@ -100,12 +101,19 @@ impl Engine {
         let payment_snapshot = payment.clone();
         let cfg = self.retry_config.clone();
 
+        let submitted_at = Instant::now();
         match retry(&cfg, || adapter.submit(&payment_snapshot)).await {
             Ok(tx_hash) => {
+                crate::observability::counter("nodus_submission_accepted_total");
+                crate::observability::gauge(
+                    "nodus_inclusion_latency_seconds",
+                    submitted_at.elapsed().as_secs_f64(),
+                );
                 self.store.set_confirmed(&payment.id, tx_hash.clone())?;
                 tracing::info!(payment_id = %payment.id, %tx_hash, "confirmed");
             }
             Err(e) => {
+                crate::observability::counter("nodus_submission_failed_total");
                 self.store.set_failed(&payment.id, e.to_string())?;
                 tracing::warn!(payment_id = %payment.id, error = %e, "failed");
             }
@@ -133,6 +141,10 @@ impl Engine {
         validation::amount(amount)?;
         let route = self.router.select(&urgency).await?;
 
+        crate::observability::gauge(
+            "nodus_simulation_resource_fee_stroops",
+            route.fee_stroops as f64,
+        );
         Ok(SimulationResult {
             sender,
             recipient,
@@ -151,10 +163,17 @@ impl Engine {
     pub async fn health(&self) -> HealthStatus {
         let fees = self.router.all_fees().await;
         let any_up = fees.iter().any(|f| f.available);
+        let durable_store = self.idempotency.ready().await;
         HealthStatus {
-            status: if any_up { "ok" } else { "degraded" },
+            status: if any_up && durable_store {
+                "ready"
+            } else {
+                "not_ready"
+            },
             chains: fees.iter().map(|f| f.chain).collect(),
             payments_in_store: self.store.len(),
+            provider_ready: any_up,
+            durable_store_ready: durable_store,
         }
     }
 }
@@ -175,4 +194,6 @@ pub struct HealthStatus {
     pub status: &'static str,
     pub chains: Vec<&'static str>,
     pub payments_in_store: usize,
+    pub provider_ready: bool,
+    pub durable_store_ready: bool,
 }

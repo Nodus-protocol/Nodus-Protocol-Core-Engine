@@ -7,6 +7,8 @@ pub enum EngineError {
     NotFound(String),
     #[error("invalid request: {0}")]
     InvalidRequest(String),
+    #[error("conflict: {0}")]
+    Conflict(String),
     #[error("chain adapter error: {0}")]
     AdapterError(String),
     #[error("network error: {0}")]
@@ -20,6 +22,7 @@ impl EngineError {
         match self {
             EngineError::NotFound(_) => 404,
             EngineError::InvalidRequest(_) => 400,
+            EngineError::Conflict(_) => 409,
             _ => 500,
         }
     }

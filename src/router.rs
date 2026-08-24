@@ -62,11 +62,14 @@ impl Router {
     pub async fn all_fees(&self) -> Vec<ChainFees> {
         let mut result = Vec::new();
         for adapter in &self.adapters {
-            let fees = adapter.fee_estimate().await.unwrap_or_default();
+            let ready = adapter.is_ready().await;
+            let fee_result = adapter.fee_estimate().await;
+            let available = ready && fee_result.is_ok();
+            let fees = fee_result.unwrap_or_default();
             result.push(ChainFees {
                 chain: adapter.name(),
                 fees,
-                available: true,
+                available,
             });
         }
         result
