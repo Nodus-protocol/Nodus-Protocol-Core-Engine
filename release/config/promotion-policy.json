@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "objectives": {
+    "http_error_rate_max": 0.01,
+    "duplicate_submission_count_max": 0,
+    "lost_terminal_result_count_max": 0,
+    "queue_depth_max": 1000,
+    "backpressure_rejection_rate_max": 0.05,
+    "recovery_seconds_max": 120,
+    "latency_p95_ms_max": 750,
+    "latency_p99_ms_max": 1500
+  },
+  "evidence": {
+    "minimum_sustainable_rate": 100,
+    "require_saturation_point": true,
+    "require_provider_budget": true,
+    "require_infrastructure_assumptions": true
+  },
+  "canary": {
+    "traffic_percent_max": 1,
+    "requests_per_minute_max": 60,
+    "request_count_max": 100,
+    "funding_xlm_max": 100,
+    "fees_xlm_max": 0.1
+  }
+}

@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "sustainable_rate_rps": 125,
+  "saturation_point_rps": 310,
+  "recovery_seconds": 0,
+  "latency_ms": {"p50": 85, "p95": 420, "p99": 910},
+  "provider_budget": {
+    "rpc_requests_per_second": 500,
+    "estimated_requests_per_second": 250,
+    "requests_per_quote": 1,
+    "headroom_percent_at_sustainable_rate": 50
+  },
+  "infrastructure_assumptions": {
+    "engine_replicas": 3,
+    "engine_cpu": "2 vCPU",
+    "engine_memory": "2 GiB",
+    "redis": "3-node managed primary/replica",
+    "database": "managed PostgreSQL, multi-AZ",
+    "ledger_close_seconds": 5
+  }
+}

@@ -1,0 +1,29 @@
+{
+  "schema_version": 1,
+  "capacity_gate_passed": true,
+  "signed_manifest_verified": true,
+  "faults": {
+    "redis_interruption": "passed",
+    "database_interruption": "passed",
+    "process_termination": "passed",
+    "slow_rpc": "passed",
+    "divergent_rpc": "passed",
+    "rate_limiting": "passed",
+    "packet_loss": "passed",
+    "accepted_submission_timeout": "passed"
+  },
+  "canary": {
+    "traffic_percent": 1,
+    "requests_per_minute": 60,
+    "request_count": 100,
+    "funding_xlm": 100,
+    "fees_xlm": 0.1,
+    "duplicate_submissions": 0,
+    "lost_terminal_results": 0,
+    "queue_depth": 20,
+    "error_rate": 0.001,
+    "latency_p95_ms": 400,
+    "recovery_seconds": 20,
+    "rollback_rehearsed": true
+  }
+}

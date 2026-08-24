@@ -1,0 +1,61 @@
+name: Release readiness
+
+on:
+  workflow_dispatch:
+    inputs:
+      target_url:
+        description: Deployed release-candidate base URL
+        required: true
+      expected_rate:
+        description: Required sustainable requests per second
+        required: true
+        default: "100"
+      max_rate:
+        description: Ramp ceiling used to find saturation
+        required: true
+        default: "500"
+
+permissions:
+  contents: read
+
+jobs:
+  readiness:
+    runs-on: ubuntu-latest
+    environment: staging
+    timeout-minutes: 45
+    env:
+      TARGET_URL: ${{ inputs.target_url }}
+      EXPECTED_RATE: ${{ inputs.expected_rate }}
+      MAX_RATE: ${{ inputs.max_rate }}
+      TOKEN_0: ${{ vars.STAGING_TOKEN_0 }}
+      TOKEN_1: ${{ vars.STAGING_TOKEN_1 }}
+      HOT_ACCOUNT: ${{ secrets.STAGING_HOT_ACCOUNT }}
+      ACCOUNT_LIST: ${{ vars.STAGING_ACCOUNT_LIST }}
+      RECONCILIATION_URL: ${{ vars.STAGING_RECONCILIATION_URL }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: grafana/setup-k6-action@v1
+      - name: Download immutable capacity report
+        env:
+          CAPACITY_REPORT_JSON: ${{ secrets.CAPACITY_REPORT_JSON }}
+        run: |
+          mkdir -p artifacts
+          printf '%s' "$CAPACITY_REPORT_JSON" > artifacts/capacity-report.json
+      - name: Run workload and enforce promotion policy
+        run: ./release/scripts/run-capacity.sh
+      - name: Enforce fault, manifest, and canary gates
+        env:
+          PROMOTION_EVIDENCE_JSON: ${{ secrets.PROMOTION_EVIDENCE_JSON }}
+        run: |
+          printf '%s' "$PROMOTION_EVIDENCE_JSON" > artifacts/promotion-evidence.json
+          python3 release/scripts/promote.py \
+            --policy release/config/promotion-policy.json \
+            --evidence artifacts/promotion-evidence.json
+      - name: Upload release evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-readiness-${{ github.sha }}
+          path: artifacts/
+          if-no-files-found: error
+          retention-days: 90
