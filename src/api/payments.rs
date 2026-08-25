@@ -15,6 +15,7 @@ impl IntoResponse for EngineError {
             404 => StatusCode::NOT_FOUND,
             400 => StatusCode::BAD_REQUEST,
             409 => StatusCode::CONFLICT,
+            412 => StatusCode::PRECONDITION_FAILED,
             _ => StatusCode::INTERNAL_SERVER_ERROR,
         };
         let code = match &self {
@@ -24,6 +25,7 @@ impl IntoResponse for EngineError {
             EngineError::AdapterError(_) => "ADAPTER_ERROR",
             EngineError::NetworkError(_) => "NETWORK_ERROR",
             EngineError::Internal(_) => "INTERNAL_ERROR",
+            EngineError::PreconditionFailed(_) => "PRECONDITION_FAILED",
         };
         (
             status,

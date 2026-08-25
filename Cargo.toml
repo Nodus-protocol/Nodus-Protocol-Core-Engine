@@ -33,6 +33,8 @@ sha2            = "0.10"
 hex             = "0.4"
 base64          = "0.22"
 redis           = { version = "0.27", features = ["tokio-comp", "connection-manager"] }
+stellar-xdr     = { version = "=26.0.1", default-features = false, features = ["std", "curr", "base64"] }
+stellar-strkey  = "0.0.13"
 
 [dev-dependencies]
 tokio           = { version = "1", features = ["full", "test-util"] }

@@ -6,9 +6,12 @@ use axum::{
 };
 use serde::Deserialize;
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::api::AppContext;
+use crate::config::Network;
 use crate::pool::math;
+use crate::pool::prepare::PrepareParams;
 use crate::utils::EngineError;
 
 type AppState = Arc<AppContext>;
@@ -245,10 +248,23 @@ pub async fn pool_stats(State(ctx): State<AppState>) -> Result<impl IntoResponse
     })))
 }
 
-// ── Build (unsigned tx) ───────────────────────────────────────────────────────
+// ── Prepare (construct + simulate; returns prepared XDR + review summary) ──────
+
+fn parse_network(s: &str) -> Result<Network, EngineError> {
+    Network::parse(s)
+}
+
+fn unix_now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
 
 #[derive(Debug, Deserialize)]
 pub struct SwapParamsRequest {
+    pub network: String,
+    pub source_account: String,
     pub to: String,
     pub amount_0_out: u128,
     pub amount_1_out: u128,
@@ -260,16 +276,24 @@ pub async fn build_swap(
     Json(req): Json<SwapParamsRequest>,
 ) -> Result<impl IntoResponse, EngineError> {
     let pool = pool_or_err(&ctx)?;
-    Ok(Json(pool.build_swap_params(
-        &req.to,
-        req.amount_0_out,
-        req.amount_1_out,
-        req.deadline,
-    )))
+    let prepared = pool
+        .prepare_swap(
+            &req.to,
+            req.amount_0_out,
+            req.amount_1_out,
+            PrepareParams {
+                network: parse_network(&req.network)?,
+                source_account: req.source_account,
+                deadline: req.deadline,
+            },
+        )
+        .await?;
+    Ok(Json(prepared))
 }
 
 #[derive(Debug, Deserialize)]
 pub struct AddLiquidityParamsRequest {
+    pub network: String,
     pub from: String,
     pub to: String,
     pub amount_0_desired: u128,
@@ -284,19 +308,29 @@ pub async fn build_add_liquidity(
     Json(req): Json<AddLiquidityParamsRequest>,
 ) -> Result<impl IntoResponse, EngineError> {
     let pool = pool_or_err(&ctx)?;
-    Ok(Json(pool.build_add_liquidity_params(
-        &req.from,
-        &req.to,
-        req.amount_0_desired,
-        req.amount_1_desired,
-        req.amount_0_min,
-        req.amount_1_min,
-        req.deadline,
-    )))
+    let network = parse_network(&req.network)?;
+    let params = PrepareParams {
+        network,
+        source_account: req.from.clone(),
+        deadline: req.deadline,
+    };
+    let prepared = pool
+        .prepare_add_liquidity(
+            &req.from,
+            &req.to,
+            req.amount_0_desired,
+            req.amount_1_desired,
+            req.amount_0_min,
+            req.amount_1_min,
+            params,
+        )
+        .await?;
+    Ok(Json(prepared))
 }
 
 #[derive(Debug, Deserialize)]
 pub struct RemoveLiquidityParamsRequest {
+    pub network: String,
     pub from: String,
     pub to: String,
     pub liquidity: u128,
@@ -310,14 +344,64 @@ pub async fn build_remove_liquidity(
     Json(req): Json<RemoveLiquidityParamsRequest>,
 ) -> Result<impl IntoResponse, EngineError> {
     let pool = pool_or_err(&ctx)?;
-    Ok(Json(pool.build_remove_liquidity_params(
-        &req.from,
-        &req.to,
-        req.liquidity,
-        req.amount_0_min,
-        req.amount_1_min,
-        req.deadline,
-    )))
+    let network = parse_network(&req.network)?;
+    let params = PrepareParams {
+        network,
+        source_account: req.from.clone(),
+        deadline: req.deadline,
+    };
+    let prepared = pool
+        .prepare_remove_liquidity(
+            &req.from,
+            &req.to,
+            req.liquidity,
+            req.amount_0_min,
+            req.amount_1_min,
+            params,
+        )
+        .await?;
+    Ok(Json(prepared))
+}
+
+// ── Validate (decode + policy-check any prepared transaction XDR) ──────────────
+
+#[derive(Debug, Deserialize)]
+pub struct ValidateRequest {
+    pub xdr: String,
+    pub network: String,
+    pub source_account: String,
+}
+
+pub async fn validate(
+    State(ctx): State<AppState>,
+    Json(req): Json<ValidateRequest>,
+) -> Result<impl IntoResponse, EngineError> {
+    let pool = pool_or_err(&ctx)?;
+    let network = parse_network(&req.network)?;
+    let review = pool
+        .validate_transaction(&req.xdr, network, &req.source_account, unix_now())
+        .await?;
+    Ok(Json(review))
+}
+
+// ── Submit (engine-owned submission: sendTransaction + poll getTransaction) ────
+
+#[derive(Debug, Deserialize)]
+pub struct SubmitRequest {
+    /// The fully-signed transaction envelope XDR. The engine never signs
+    /// anything — it only relays this to Soroban RPC and polls for the
+    /// result. Callers who want to keep submission ownership themselves
+    /// simply never call this endpoint.
+    pub signed_xdr: String,
+}
+
+pub async fn submit(
+    State(ctx): State<AppState>,
+    Json(req): Json<SubmitRequest>,
+) -> Result<impl IntoResponse, EngineError> {
+    let pool = pool_or_err(&ctx)?;
+    let result = pool.submit_transaction(&req.signed_xdr).await?;
+    Ok(Json(result))
 }
 
 #[allow(dead_code)]

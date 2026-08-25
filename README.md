@@ -148,6 +148,96 @@ GET /api/v1/pay/:txHash
 
 ---
 
+## AMM Pool — Soroban Transaction Preparation
+
+Pool write calls (`swap`, `add_liquidity`, `remove_liquidity`) are prepared,
+not blindly forwarded: the engine encodes real, typed Soroban XDR against an
+embedded manifest of the pool contract's audited ABI (see
+[`src/pool/abi.rs`](src/pool/abi.rs)), simulates it against Soroban RPC, and
+hands back the fully-prepared transaction alongside a review summary decoded
+straight back out of that same XDR — never from the original request — so
+what you're shown is provably what you'd be signing.
+
+```http
+POST /api/v1/pool/build/swap
+Content-Type: application/json
+
+{
+  "network": "testnet",
+  "source_account": "GABC...",
+  "to": "GABC...",
+  "amount_0_out": 1000000,
+  "amount_1_out": 0,
+  "deadline": 1735689600
+}
+```
+
+**Response**
+
+```json
+{
+  "xdr": "AAAAAgAAAAA...",
+  "review": {
+    "spec_hash": "5393928...",
+    "contract": "CABC...",
+    "function": "swap",
+    "args": { "to": "GABC...", "amount_0_out": "1000000", "amount_1_out": "0", "deadline": "1735689600" },
+    "source_account": "GABC...",
+    "sequence": 12345,
+    "fee_stroops": 1100,
+    "resource_fee_stroops": 1000,
+    "deadline": 1735689600,
+    "operation_count": 1,
+    "auth_entry_count": 0,
+    "auth": []
+  }
+}
+```
+
+Preparation binds network, source account, current sequence, contract,
+exact amounts, recipient, deadline, and base fee; it fails closed on an
+expired deadline, a fee above `POOL_FEE_CEILING_STROOPS`, an unfunded
+source account, a simulation error, or ledger entries that need
+restoration. **Frontend and Mobile should independently decode and verify
+the returned `xdr` before requesting a signature** — don't trust `review`
+alone.
+
+`add_liquidity` and `remove_liquidity` work the same way at
+`/api/v1/pool/build/add-liquidity` and `/api/v1/pool/build/remove-liquidity`.
+
+### Validating a transaction
+
+`POST /api/v1/pool/validate` decodes and policy-checks *any* prepared
+transaction XDR — the same checks preparation runs on its own output —
+useful for verifying a transaction you didn't build yourself:
+
+```http
+POST /api/v1/pool/validate
+Content-Type: application/json
+
+{ "xdr": "AAAAAgAAAAA...", "network": "testnet", "source_account": "GABC..." }
+```
+
+### Submitting a transaction
+
+Preparation never signs anything — that's Frontend/Mobile's job. Once
+signed, a caller can submit the XDR directly via their own Soroban RPC
+access, or ask the engine to own submission instead:
+
+```http
+POST /api/v1/pool/submit
+Content-Type: application/json
+
+{ "signed_xdr": "AAAAAgAAAAA..." }
+```
+
+This relays to Soroban RPC's `sendTransaction` and polls `getTransaction`
+until it resolves. Ownership is explicit per endpoint: calling `/submit`
+means the engine owns submission for that transaction; not calling it means
+you do.
+
+---
+
 ## SDK
 
 A JavaScript/TypeScript SDK is available for easy integration:

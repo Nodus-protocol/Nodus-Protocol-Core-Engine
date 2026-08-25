@@ -117,12 +117,7 @@ async fn main() {
             rpc = %p.soroban_rpc_url,
             "AMM pool contract configured"
         );
-        ContractClient::new(
-            SorobanRpc::new(&p.soroban_rpc_url),
-            &p.contract_id,
-            &p.token_0,
-            &p.token_1,
-        )
+        ContractClient::new(SorobanRpc::new(&p.soroban_rpc_url), p, cfg.network)
     });
 
     if pool_client.is_none() {
@@ -199,8 +194,9 @@ async fn main() {
             auth_disabled,
             100,
         ))
-        // Transaction construction — pure, unsigned tx building and
-        // simulation. No chain effect.
+        // Transaction construction — pure, unsigned tx building, simulation,
+        // and decode/policy-check of an already-prepared transaction XDR.
+        // No chain effect.
         .merge(scoped(
             Router::new()
                 .route("/api/v1/payments/simulate", post(api::payments::simulate))
@@ -212,7 +208,8 @@ async fn main() {
                 .route(
                     "/api/v1/pool/build/remove-liquidity",
                     post(api::pool::build_remove_liquidity),
-                ),
+                )
+                .route("/api/v1/pool/validate", post(api::pool::validate)),
             Scope::TxConstruct,
             &auth_state,
             &rate_limiter,
@@ -223,7 +220,8 @@ async fn main() {
         .merge(scoped(
             Router::new()
                 .route("/api/v1/payments", post(api::payments::initiate))
-                .route("/api/v1/payments/batch", post(api::batch::submit)),
+                .route("/api/v1/payments/batch", post(api::batch::submit))
+                .route("/api/v1/pool/submit", post(api::pool::submit)),
             Scope::TxSubmit,
             &auth_state,
             &rate_limiter,
