@@ -15,6 +15,12 @@ pub enum EngineError {
     NetworkError(String),
     #[error("internal error: {0}")]
     Internal(String),
+    /// A request that is well-formed but fails a policy precondition tied to
+    /// current chain/ledger state: stale sequence number, expired deadline,
+    /// a fee above the configured ceiling, or state that requires ledger
+    /// entry restoration before it can be simulated.
+    #[error("precondition failed: {0}")]
+    PreconditionFailed(String),
 }
 
 impl EngineError {
@@ -23,6 +29,7 @@ impl EngineError {
             EngineError::NotFound(_) => 404,
             EngineError::InvalidRequest(_) => 400,
             EngineError::Conflict(_) => 409,
+            EngineError::PreconditionFailed(_) => 412,
             _ => 500,
         }
     }

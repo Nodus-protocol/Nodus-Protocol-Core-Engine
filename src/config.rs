@@ -71,12 +71,35 @@ pub enum Network {
     Testnet,
 }
 
+impl Network {
+    /// Parses the `network` field callers declare on transaction
+    /// preparation/validation/submission requests. Deliberately strict —
+    /// no aliases, no case-folding — so a typo fails loudly as an
+    /// `InvalidRequest` rather than silently matching the wrong network.
+    pub fn parse(s: &str) -> Result<Self, crate::utils::EngineError> {
+        match s {
+            "mainnet" => Ok(Network::Mainnet),
+            "testnet" => Ok(Network::Testnet),
+            other => Err(crate::utils::EngineError::InvalidRequest(format!(
+                "network must be 'mainnet' or 'testnet', got '{other}'"
+            ))),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct PoolConfig {
     pub soroban_rpc_url: String,
     pub contract_id: String,
     pub token_0: String,
     pub token_1: String,
+    /// Classic (non-resource) base fee, in stroops, before Soroban RPC's
+    /// simulated resource fee is added on top.
+    pub base_fee_stroops: u32,
+    /// Hard ceiling on the total prepared fee (base + resource), in
+    /// stroops. Transaction preparation refuses to hand back a transaction
+    /// priced above this, regardless of what simulation says it costs.
+    pub fee_ceiling_stroops: u32,
 }
 
 impl Config {
@@ -103,6 +126,14 @@ impl Config {
                     contract_id: contract,
                     token_0: t0,
                     token_1: t1,
+                    base_fee_stroops: env::var("POOL_BASE_FEE_STROOPS")
+                        .ok()
+                        .and_then(|v| v.parse().ok())
+                        .unwrap_or(100),
+                    fee_ceiling_stroops: env::var("POOL_FEE_CEILING_STROOPS")
+                        .ok()
+                        .and_then(|v| v.parse().ok())
+                        .unwrap_or(10_000_000),
                 }),
                 _ => None,
             }

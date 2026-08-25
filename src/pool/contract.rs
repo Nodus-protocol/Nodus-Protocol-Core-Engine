@@ -3,7 +3,10 @@ use serde::Serialize;
 use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
 
-use crate::pool::{math, soroban::SorobanRpc};
+use crate::config::{Network, PoolConfig};
+use crate::pool::abi::PoolFunction;
+use crate::pool::prepare::{self, PrepareParams, PreparedTransaction};
+use crate::pool::{math, soroban::SorobanRpc, xdr};
 use crate::utils::EngineError;
 
 const CACHE_TTL: Duration = Duration::from_secs(30);
@@ -29,36 +32,39 @@ pub struct PriceQuote {
     pub effective_price: f64,
 }
 
-#[derive(Debug, Clone, Serialize)]
-pub struct UnsignedTx {
-    pub contract_id: String,
-    pub function: String,
-    pub args: serde_json::Value,
-    pub note: &'static str,
-}
-
 struct CachedReserves {
     data: PoolReserves,
     fetched_at: Instant,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct SubmitResult {
+    pub hash: String,
+    pub send_status: String,
+    pub final_status: String,
+    pub result_xdr: Option<String>,
+    pub polled_attempts: u32,
+}
+
 pub struct ContractClient {
     rpc: SorobanRpc,
-    contract_id: String,
-    token_0: String,
-    token_1: String,
+    pool: PoolConfig,
+    network: Network,
     cache: RwLock<Option<CachedReserves>>,
 }
 
 impl ContractClient {
-    pub fn new(rpc: SorobanRpc, contract_id: &str, token_0: &str, token_1: &str) -> Self {
+    pub fn new(rpc: SorobanRpc, pool: &PoolConfig, network: Network) -> Self {
         Self {
             rpc,
-            contract_id: contract_id.to_string(),
-            token_0: token_0.to_string(),
-            token_1: token_1.to_string(),
+            pool: pool.clone(),
+            network,
             cache: RwLock::new(None),
         }
+    }
+
+    fn contract_id(&self) -> &str {
+        &self.pool.contract_id
     }
 
     pub async fn get_reserves(&self) -> Result<PoolReserves, EngineError> {
@@ -140,6 +146,16 @@ impl ContractClient {
         })
     }
 
+    /// **Known limitation:** this queries an `"LpBalance"` key on the pool
+    /// contract's own instance storage. In the currently deployed contract
+    /// (see `contracts/pool/src/lib.rs` /
+    /// `contracts/pool/src/storage.rs::DataKey` in
+    /// `Nodus-protocol/Nodus-Protocol-Smart-Contract`), LP balances and
+    /// total supply live on a separate SEP-41 LP token contract
+    /// (`DataKey::LpToken`), not in the pool's own storage — that key does
+    /// not exist here, so this always resolves to `0`. Left as pre-existing
+    /// behavior; fixing it requires querying the LP token contract address
+    /// (tracked separately from this transaction-preparation work).
     pub async fn lp_balance(&self, address: &str) -> Result<u128, EngineError> {
         let key_xdr = self.lp_balance_key_xdr(address)?;
         let entries = self.rpc.get_ledger_entries(vec![key_xdr]).await?;
@@ -149,29 +165,32 @@ impl ContractClient {
         parse_i128_from_xdr(&entries[0].xdr)
     }
 
-    // Returns unsigned transaction parameters for the client to sign and submit.
-    pub fn build_swap_params(
+    /// Builds, simulates, and returns a ready-to-sign `swap` transaction.
+    /// See [`crate::pool::prepare::prepare`] for the full pipeline.
+    pub async fn prepare_swap(
         &self,
         to: &str,
         amount_0_out: u128,
         amount_1_out: u128,
-        deadline: u64,
-    ) -> UnsignedTx {
-        UnsignedTx {
-            contract_id: self.contract_id.clone(),
-            function: "swap".into(),
-            args: serde_json::json!({
-                "to": to,
-                "amount_0_out": amount_0_out.to_string(),
-                "amount_1_out": amount_1_out.to_string(),
-                "deadline": deadline
-            }),
-            note: "Sign this with your Stellar wallet and submit via Horizon POST /transactions",
-        }
+        params: PrepareParams,
+    ) -> Result<PreparedTransaction, EngineError> {
+        let deadline = params.deadline;
+        let args = prepare::encode_swap_args(to, amount_0_out, amount_1_out, deadline)?;
+        prepare::prepare(
+            &self.rpc,
+            &self.pool,
+            &self.network,
+            PoolFunction::Swap,
+            args,
+            params,
+        )
+        .await
     }
 
+    /// Builds, simulates, and returns a ready-to-sign `add_liquidity`
+    /// transaction.
     #[allow(clippy::too_many_arguments)]
-    pub fn build_add_liquidity_params(
+    pub async fn prepare_add_liquidity(
         &self,
         from: &str,
         to: &str,
@@ -179,50 +198,138 @@ impl ContractClient {
         amount_1_desired: u128,
         amount_0_min: u128,
         amount_1_min: u128,
-        deadline: u64,
-    ) -> UnsignedTx {
-        UnsignedTx {
-            contract_id: self.contract_id.clone(),
-            function: "add_liquidity".into(),
-            args: serde_json::json!({
-                "from": from,
-                "to": to,
-                "amount_0_desired": amount_0_desired.to_string(),
-                "amount_1_desired": amount_1_desired.to_string(),
-                "amount_0_min": amount_0_min.to_string(),
-                "amount_1_min": amount_1_min.to_string(),
-                "deadline": deadline
-            }),
-            note: "Sign this with your Stellar wallet and submit via Horizon POST /transactions",
-        }
+        params: PrepareParams,
+    ) -> Result<PreparedTransaction, EngineError> {
+        let deadline = params.deadline;
+        let args = prepare::encode_add_liquidity_args(
+            from,
+            to,
+            amount_0_desired,
+            amount_1_desired,
+            amount_0_min,
+            amount_1_min,
+            deadline,
+        )?;
+        prepare::prepare(
+            &self.rpc,
+            &self.pool,
+            &self.network,
+            PoolFunction::AddLiquidity,
+            args,
+            params,
+        )
+        .await
     }
 
-    pub fn build_remove_liquidity_params(
+    /// Builds, simulates, and returns a ready-to-sign `remove_liquidity`
+    /// transaction.
+    pub async fn prepare_remove_liquidity(
         &self,
         from: &str,
         to: &str,
         liquidity: u128,
         amount_0_min: u128,
         amount_1_min: u128,
-        deadline: u64,
-    ) -> UnsignedTx {
-        UnsignedTx {
-            contract_id: self.contract_id.clone(),
-            function: "remove_liquidity".into(),
-            args: serde_json::json!({
-                "from": from,
-                "to": to,
-                "liquidity": liquidity.to_string(),
-                "amount_0_min": amount_0_min.to_string(),
-                "amount_1_min": amount_1_min.to_string(),
-                "deadline": deadline
-            }),
-            note: "Sign this with your Stellar wallet and submit via Horizon POST /transactions",
+        params: PrepareParams,
+    ) -> Result<PreparedTransaction, EngineError> {
+        let deadline = params.deadline;
+        let args = prepare::encode_remove_liquidity_args(
+            from,
+            to,
+            liquidity,
+            amount_0_min,
+            amount_1_min,
+            deadline,
+        )?;
+        prepare::prepare(
+            &self.rpc,
+            &self.pool,
+            &self.network,
+            PoolFunction::RemoveLiquidity,
+            args,
+            params,
+        )
+        .await
+    }
+
+    /// Decodes and policy-checks an arbitrary prepared transaction XDR —
+    /// the same checks [`Self::prepare_swap`] and friends run on their own
+    /// output before returning it. Does a fresh live read of `source`'s
+    /// on-chain sequence number so staleness is checked against current
+    /// state, not a caller-supplied claim.
+    pub async fn validate_transaction(
+        &self,
+        xdr: &str,
+        declared_network: Network,
+        source: &str,
+        now: u64,
+    ) -> Result<prepare::ReviewSummary, EngineError> {
+        let account_key = xdr::account_ledger_key(source)?;
+        let entries = self.rpc.get_ledger_entries(vec![account_key]).await?;
+        let expected_sequence = match entries.first() {
+            Some(entry) => Some(prepare::decode_account_sequence(&entry.xdr)?),
+            None => None,
+        };
+
+        prepare::validate(
+            xdr,
+            &prepare::ValidateContext {
+                network: self.network,
+                declared_network,
+                contract_id: self.pool.contract_id.clone(),
+                fee_ceiling_stroops: self.pool.fee_ceiling_stroops,
+                now,
+                expected_sequence,
+            },
+        )
+    }
+
+    /// Engine-owned submission: relays an already-signed transaction
+    /// envelope XDR to Soroban RPC's `sendTransaction`, then polls
+    /// `getTransaction` until it leaves `NOT_FOUND` or a poll budget is
+    /// exhausted. The engine never signs anything here — this is purely a
+    /// relay-and-poll convenience for callers who want the engine to own
+    /// submission rather than talking to RPC themselves; a caller who
+    /// wants to keep that ownership simply never calls this endpoint and
+    /// submits the XDR from `prepare_swap`/etc. on their own.
+    pub async fn submit_transaction(&self, signed_xdr: &str) -> Result<SubmitResult, EngineError> {
+        let sent = self.rpc.send_transaction(signed_xdr).await?;
+        if sent.status != "PENDING" && sent.status != "DUPLICATE" {
+            return Err(EngineError::PreconditionFailed(format!(
+                "sendTransaction returned {}: {}",
+                sent.status,
+                sent.error_result_xdr.unwrap_or_default()
+            )));
         }
+
+        const MAX_POLLS: u32 = 10;
+        const POLL_DELAY: Duration = Duration::from_secs(2);
+
+        for attempt in 1..=MAX_POLLS {
+            tokio::time::sleep(POLL_DELAY).await;
+            let got = self.rpc.get_transaction(&sent.hash).await?;
+            if got.status != "NOT_FOUND" {
+                return Ok(SubmitResult {
+                    hash: sent.hash,
+                    send_status: sent.status,
+                    final_status: got.status,
+                    result_xdr: got.result_xdr,
+                    polled_attempts: attempt,
+                });
+            }
+        }
+
+        Ok(SubmitResult {
+            hash: sent.hash,
+            send_status: sent.status,
+            final_status: "NOT_FOUND".to_string(),
+            result_xdr: None,
+            polled_attempts: MAX_POLLS,
+        })
     }
 
     async fn fetch_reserves(&self) -> Result<PoolReserves, EngineError> {
-        let key = self.instance_key_xdr()?;
+        let key = xdr::contract_instance_ledger_key(self.contract_id())?;
         let entries = self.rpc.get_ledger_entries(vec![key]).await?;
 
         if entries.is_empty() {
@@ -233,24 +340,11 @@ impl ContractClient {
             crate::observability::gauge("nodus_quote_source_ledger", ledger as f64);
         }
         crate::observability::gauge("nodus_provider_divergence_ledgers", 0.0);
-        parse_instance_storage(&entries[0].xdr, &self.token_0, &self.token_1)
-    }
-
-    fn instance_key_xdr(&self) -> Result<String, EngineError> {
-        // XDR for: LedgerKey::ContractData { contract, key: ScVal::LedgerKeyContractInstance, durability: Persistent }
-        // Encoded as binary: type(CONTRACT_DATA=2), contract(ScAddress::Contract + 32 bytes), key(SCV_LEDGER_KEY_CONTRACT_INSTANCE=18), durability(PERSISTENT=1)
-        let contract_bytes = parse_contract_id(&self.contract_id)?;
-        let mut buf = Vec::new();
-        buf.extend_from_slice(&2u32.to_be_bytes()); // LedgerKeyType::ContractData
-        buf.extend_from_slice(&1u32.to_be_bytes()); // ScAddress::Contract
-        buf.extend_from_slice(&contract_bytes); // 32-byte contract hash
-        buf.extend_from_slice(&18u32.to_be_bytes()); // ScValType::LedgerKeyContractInstance
-        buf.extend_from_slice(&1u32.to_be_bytes()); // ContractDataDurability::Persistent
-        Ok(B64.encode(&buf))
+        parse_instance_storage(&entries[0].xdr, &self.pool.token_0, &self.pool.token_1)
     }
 
     fn lp_balance_key_xdr(&self, address: &str) -> Result<String, EngineError> {
-        let contract_bytes = parse_contract_id(&self.contract_id)?;
+        let contract_bytes = parse_contract_id(self.contract_id())?;
         let addr_bytes = parse_contract_id(address)?;
         let mut buf = Vec::new();
         buf.extend_from_slice(&2u32.to_be_bytes()); // CONTRACT_DATA
