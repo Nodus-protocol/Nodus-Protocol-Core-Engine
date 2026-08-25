@@ -1,13 +1,16 @@
 pub mod adapters;
 pub mod api;
+pub mod auth;
 pub mod batch;
 pub mod circuit_breaker;
 pub mod config;
 pub mod engine;
 pub mod idempotency;
 pub mod middleware;
+pub mod nonce_store;
 pub mod observability;
 pub mod pool;
+pub mod rate_limit;
 pub mod rates;
 pub mod retry;
 pub mod router;

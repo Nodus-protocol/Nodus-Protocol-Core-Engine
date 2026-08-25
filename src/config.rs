@@ -1,6 +1,9 @@
+use std::collections::HashMap;
 use std::env;
 
-#[derive(Debug, Clone)]
+use crate::auth::{parse_service_keys, ServiceKey};
+
+#[derive(Clone)]
 pub struct Config {
     pub port: u16,
     pub network: Network,
@@ -21,6 +24,45 @@ pub struct Config {
     pub expected_network: Network,
     pub reconciliation_lag_seconds: u64,
     pub reconciliation_lag_max_seconds: u64,
+    /// Signed-request service identities. Empty unless `ENGINE_AUTH_KEYS` is set.
+    pub auth_keys: HashMap<String, ServiceKey>,
+    /// Escape hatch for local development only — refuses to activate on mainnet.
+    pub auth_disabled: bool,
+    pub auth_clock_skew_secs: u64,
+    pub auth_replay_window_secs: u64,
+    /// Explicit CORS allow-list. Empty means CORS is disabled entirely
+    /// (no browser origin may call the engine cross-origin).
+    pub cors_allowed_origins: Vec<String>,
+    /// Operator attestation that TLS is terminated in front of this engine
+    /// (load balancer, service mesh mTLS, sidecar proxy, ...). The engine
+    /// itself speaks plain HTTP; on mainnet it refuses to start unless this
+    /// is set, so an operator can't accidentally expose the plaintext port.
+    pub tls_terminated_upstream: bool,
+    /// Explicit override to run without the TLS attestation above. Only
+    /// meant for local development — `validate()` still blocks mainnet.
+    pub allow_insecure_transport: bool,
+}
+
+// Config intentionally excludes secrets from its Debug output — never derive
+// Debug here, since `auth_keys` holds raw HMAC secret bytes.
+impl std::fmt::Debug for Config {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Config")
+            .field("port", &self.port)
+            .field("network", &self.network)
+            .field("pool_configured", &self.pool.is_some())
+            .field("redis_configured", &self.redis_url.is_some())
+            .field("release", &self.release)
+            .field("expected_network", &self.expected_network)
+            .field(
+                "reconciliation_lag_seconds",
+                &self.reconciliation_lag_seconds,
+            )
+            .field("auth_keys_configured", &self.auth_keys.len())
+            .field("auth_disabled", &self.auth_disabled)
+            .field("cors_allowed_origins", &self.cors_allowed_origins)
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -109,6 +151,75 @@ impl Config {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(30),
+            auth_keys: match env::var("ENGINE_AUTH_KEYS") {
+                Ok(raw) if !raw.trim().is_empty() => parse_service_keys(&raw).unwrap_or_else(|e| {
+                    panic!("ENGINE_AUTH_KEYS is invalid: {e}");
+                }),
+                _ => HashMap::new(),
+            },
+            auth_disabled: env::var("ENGINE_AUTH_DISABLED")
+                .map(|v| v == "true")
+                .unwrap_or(false),
+            auth_clock_skew_secs: env::var("ENGINE_AUTH_CLOCK_SKEW_SECS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(60),
+            auth_replay_window_secs: env::var("ENGINE_AUTH_REPLAY_WINDOW_SECS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(300),
+            cors_allowed_origins: env::var("CORS_ALLOWED_ORIGINS")
+                .ok()
+                .map(|v| {
+                    v.split(',')
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .map(String::from)
+                        .collect()
+                })
+                .unwrap_or_default(),
+            tls_terminated_upstream: env::var("TLS_TERMINATED_UPSTREAM")
+                .map(|v| v == "true")
+                .unwrap_or(false),
+            allow_insecure_transport: env::var("ENGINE_ALLOW_INSECURE_TRANSPORT")
+                .map(|v| v == "true")
+                .unwrap_or(false),
+        }
+    }
+
+    /// Fails startup when the configuration would be unsafe to run in
+    /// production: no service keys configured (or auth explicitly
+    /// disabled) while targeting mainnet. Local/testnet development may
+    /// still opt out via `ENGINE_AUTH_DISABLED=true`.
+    pub fn validate(&self) {
+        if self.network == Network::Mainnet {
+            if self.auth_disabled {
+                panic!(
+                    "refusing to start: ENGINE_AUTH_DISABLED=true is not allowed when NETWORK=mainnet"
+                );
+            }
+            if self.auth_keys.is_empty() {
+                panic!(
+                    "refusing to start: NETWORK=mainnet requires at least one key in ENGINE_AUTH_KEYS"
+                );
+            }
+        }
+        if !self.auth_disabled && self.auth_keys.is_empty() {
+            tracing::warn!("ENGINE_AUTH_KEYS is empty — every non-health request will be rejected");
+        }
+
+        if !self.tls_terminated_upstream && !self.allow_insecure_transport {
+            if self.network == Network::Mainnet {
+                panic!(
+                    "refusing to start: set TLS_TERMINATED_UPSTREAM=true once TLS is terminated \
+                     in front of this engine (load balancer / mesh mTLS), or \
+                     ENGINE_ALLOW_INSECURE_TRANSPORT=true to explicitly accept plaintext transport"
+                );
+            }
+            tracing::warn!(
+                "TLS_TERMINATED_UPSTREAM is not set — this engine speaks plain HTTP and must sit \
+                 behind a TLS-terminating proxy in any shared or production environment"
+            );
         }
     }
 
@@ -137,9 +248,8 @@ impl Config {
 mod tests {
     use super::*;
 
-    #[test]
-    fn readiness_rejects_identity_and_contract_mismatches() {
-        let config = Config {
+    fn base_config() -> Config {
+        Config {
             port: 8080,
             network: Network::Mainnet,
             horizon_url: String::new(),
@@ -157,7 +267,19 @@ mod tests {
             expected_network: Network::Testnet,
             reconciliation_lag_seconds: 31,
             reconciliation_lag_max_seconds: 30,
-        };
+            auth_keys: HashMap::new(),
+            auth_disabled: true,
+            auth_clock_skew_secs: 60,
+            auth_replay_window_secs: 300,
+            cors_allowed_origins: Vec::new(),
+            tls_terminated_upstream: false,
+            allow_insecure_transport: true,
+        }
+    }
+
+    #[test]
+    fn readiness_rejects_identity_and_contract_mismatches() {
+        let config = base_config();
         assert_eq!(
             config.static_readiness(),
             vec![
@@ -168,5 +290,44 @@ mod tests {
                 "reconciliation_backlog",
             ]
         );
+    }
+
+    #[test]
+    fn validate_panics_on_mainnet_without_auth_keys() {
+        let mut config = base_config();
+        config.auth_disabled = false;
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| config.validate()));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn validate_panics_on_mainnet_with_auth_disabled() {
+        let mut config = base_config();
+        config.auth_disabled = true;
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| config.validate()));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn validate_panics_on_mainnet_without_tls_attestation() {
+        let mut config = base_config();
+        config.auth_disabled = false;
+        config.auth_keys.insert(
+            "k".into(),
+            crate::auth::parse_service_keys("k:00112233445566778899aabbccddeeff:read")
+                .unwrap()
+                .remove("k")
+                .unwrap(),
+        );
+        config.allow_insecure_transport = false;
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| config.validate()));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn validate_passes_on_testnet_with_defaults() {
+        let mut config = base_config();
+        config.network = Network::Testnet;
+        config.validate();
     }
 }
