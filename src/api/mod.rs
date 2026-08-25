@@ -8,6 +8,7 @@ pub mod webhooks;
 
 use std::sync::Arc;
 
+use crate::config::Config;
 use crate::engine::Engine;
 use crate::pool::ContractClient;
 use crate::rates::RateService;
@@ -18,6 +19,7 @@ pub struct AppContext {
     pub rates: RateService,
     pub webhooks: Arc<WebhookStore>,
     pub pool: Option<ContractClient>,
+    pub config: Config,
 }
 
 pub type AppState = Arc<AppContext>;

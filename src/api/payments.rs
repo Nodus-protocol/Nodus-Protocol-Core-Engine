@@ -4,6 +4,7 @@ use axum::{
     response::{IntoResponse, Json, Response},
 };
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use crate::api::AppState;
 use crate::utils::{ApiError, EngineError, Urgency};
@@ -18,6 +19,7 @@ impl IntoResponse for EngineError {
         let code = match &self {
             EngineError::NotFound(_) => "NOT_FOUND",
             EngineError::InvalidRequest(_) => "INVALID_REQUEST",
+            EngineError::Conflict(_) => "CONFLICT",
             EngineError::AdapterError(_) => "ADAPTER_ERROR",
             EngineError::NetworkError(_) => "NETWORK_ERROR",
             EngineError::Internal(_) => "INTERNAL_ERROR",
@@ -33,7 +35,7 @@ impl IntoResponse for EngineError {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct InitiateRequest {
     pub sender: String,
     pub recipient: String,
@@ -48,9 +50,21 @@ pub async fn initiate(
     State(ctx): State<AppState>,
     Json(req): Json<InitiateRequest>,
 ) -> Result<(StatusCode, impl IntoResponse), EngineError> {
+    let fingerprint = request_fingerprint(&req);
     if let Some(ref key) = req.idempotency_key {
         match ctx.engine.idempotency().get(key).await {
-            Ok(Some(cached)) => return Ok((StatusCode::OK, Json(cached).into_response())),
+            Ok(Some(cached)) => {
+                if cached["request_fingerprint"] != fingerprint {
+                    crate::observability::counter("nodus_idempotency_conflicts_total");
+                    return Err(EngineError::Conflict(
+                        "idempotency key reused with a different request".into(),
+                    ));
+                }
+                return Ok((
+                    StatusCode::OK,
+                    Json(cached["response"].clone()).into_response(),
+                ));
+            }
             Err(e) => {
                 tracing::warn!(error = %e, "idempotency get failed, proceeding as first request")
             }
@@ -71,12 +85,18 @@ pub async fn initiate(
 
     if let Some(key) = req.idempotency_key {
         let body = serde_json::to_value(&payment).unwrap_or_default();
-        if let Err(e) = ctx.engine.idempotency().set(key, body).await {
+        let cached = serde_json::json!({"request_fingerprint": fingerprint, "response": body});
+        if let Err(e) = ctx.engine.idempotency().set(key, cached).await {
             tracing::warn!(error = %e, "failed to store idempotency key");
         }
     }
 
     Ok((StatusCode::CREATED, Json(payment).into_response()))
+}
+
+fn request_fingerprint(request: &InitiateRequest) -> String {
+    let bytes = serde_json::to_vec(request).unwrap_or_default();
+    hex::encode(Sha256::digest(bytes))
 }
 
 pub async fn get(

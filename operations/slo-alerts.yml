@@ -1,0 +1,21 @@
+slos:
+  quote_freshness: { target: 0.999, window: 30d, threshold_seconds: 15 }
+  preparation: { target: 0.999, window: 30d, threshold_seconds: 1 }
+  submission_acceptance: { target: 0.999, window: 30d, threshold_seconds: 5 }
+  confirmation: { target: 0.99, window: 30d, threshold_seconds: 30 }
+  reconciliation: { target: 0.999, window: 30d, threshold_seconds: 30 }
+
+alerts:
+  - { name: RpcOutage, signal: nodus_submission_failed_total, condition: increase_5m > 0, severity: page }
+  - { name: RedisLoss, signal: readyz.durable_store_ready, condition: false_for_1m, severity: page }
+  - { name: StaleLedger, signal: nodus_quote_age_seconds, condition: value > 15_for_2m, severity: page }
+  - { name: ReconciliationBacklog, signal: nodus_reconciliation_lag_seconds, condition: value > 30_for_5m, severity: page }
+  - { name: IdempotencyConflict, signal: nodus_idempotency_conflicts_total, condition: increase_5m > 0, severity: page }
+
+dashboard:
+  group_by: [network, provider, release, manifest, contract_version, endpoint]
+  panels:
+    - [nodus_http_request_latency_seconds, nodus_http_errors_total]
+    - [nodus_quote_source_ledger, nodus_quote_age_seconds, nodus_quote_cache_hit_age_seconds]
+    - [nodus_simulation_resource_fee_stroops, nodus_submission_accepted_total, nodus_submission_failed_total]
+    - [nodus_inclusion_latency_seconds, nodus_reconciliation_lag_seconds, nodus_provider_divergence_ledgers, nodus_queue_depth]

@@ -13,6 +13,7 @@ use crate::utils::EngineError;
 pub trait IdempotencyStore: Send + Sync {
     async fn get(&self, key: &str) -> Result<Option<Value>, EngineError>;
     async fn set(&self, key: String, body: Value) -> Result<(), EngineError>;
+    async fn ready(&self) -> bool;
 }
 
 pub struct RedisIdempotencyStore {
@@ -60,6 +61,14 @@ impl IdempotencyStore for RedisIdempotencyStore {
             .map_err(|e| EngineError::Internal(format!("redis set error: {e}")))?;
         Ok(())
     }
+
+    async fn ready(&self) -> bool {
+        let mut conn = self.conn.clone();
+        redis::cmd("PING")
+            .query_async::<String>(&mut conn)
+            .await
+            .is_ok()
+    }
 }
 
 struct Entry {
@@ -106,6 +115,10 @@ impl IdempotencyStore for MemoryIdempotencyStore {
             },
         );
         Ok(())
+    }
+
+    async fn ready(&self) -> bool {
+        false
     }
 }
 

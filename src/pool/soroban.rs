@@ -106,9 +106,7 @@ impl SorobanRpc {
     }
 
     async fn rpc(&self, body: Value) -> Result<Value, EngineError> {
-        let resp = self
-            .client
-            .post(&self.endpoint)
+        let resp = crate::observability::propagate(self.client.post(&self.endpoint))
             .json(&body)
             .send()
             .await

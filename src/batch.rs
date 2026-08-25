@@ -52,16 +52,22 @@ pub async fn process_batch(
 
     for (i, item) in items.into_iter().enumerate() {
         let eng = engine.clone();
+        let correlation_id = crate::observability::correlation_id();
         set.spawn(async move {
-            let result = eng
-                .initiate(
+            let work = async {
+                eng.initiate(
                     item.sender,
                     item.recipient,
                     item.amount,
                     item.token,
                     item.urgency,
                 )
-                .await;
+                .await
+            };
+            let result = match correlation_id {
+                Some(id) => crate::observability::correlated(id, work).await,
+                None => work.await,
+            };
             (i, result)
         });
     }

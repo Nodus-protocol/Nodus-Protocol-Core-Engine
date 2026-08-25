@@ -18,14 +18,6 @@ impl StellarAdapter {
                 .expect("failed to build HTTP client"),
         }
     }
-
-    pub fn mainnet() -> Self {
-        Self::new("https://horizon.stellar.org")
-    }
-
-    pub fn testnet() -> Self {
-        Self::new("https://horizon-testnet.stellar.org")
-    }
 }
 
 #[async_trait]
@@ -35,14 +27,7 @@ impl ChainAdapter for StellarAdapter {
         validation::stellar_address(&payment.recipient)?;
         validation::amount(payment.amount)?;
 
-        tracing::info!(
-            payment_id = %payment.id,
-            from  = %payment.sender,
-            to    = %payment.recipient,
-            amount = payment.amount,
-            token  = %payment.token,
-            "submitting to Stellar"
-        );
+        tracing::info!(payment_id = %payment.id, "submitting to Stellar");
 
         // Derives a deterministic mock tx hash from the payment ID.
         // Replace with real XDR construction + POST /transactions to Horizon.
@@ -60,7 +45,10 @@ impl ChainAdapter for StellarAdapter {
     async fn fee_estimate(&self) -> Result<FeeEstimate, EngineError> {
         let url = format!("{}/fee_stats", self.horizon_url);
 
-        match self.client.get(&url).send().await {
+        match crate::observability::propagate(self.client.get(&url))
+            .send()
+            .await
+        {
             Ok(resp) if resp.status().is_success() => {
                 let stats: serde_json::Value = resp
                     .json()
@@ -88,20 +76,46 @@ impl ChainAdapter for StellarAdapter {
                     urgent_seconds: 1,
                 })
             }
-            Err(e) => {
-                tracing::warn!("Horizon fee_stats unavailable: {e}");
-                Ok(FeeEstimate::default())
-            }
-            _ => Ok(FeeEstimate::default()),
+            Err(e) => Err(EngineError::NetworkError(e.to_string())),
+            Ok(resp) => Err(EngineError::NetworkError(format!(
+                "horizon returned {}",
+                resp.status()
+            ))),
         }
     }
 
     async fn is_confirmed(&self, tx_hash: &str) -> Result<bool, EngineError> {
         let url = format!("{}/transactions/{}", self.horizon_url, tx_hash);
-        match self.client.get(&url).send().await {
+        match crate::observability::propagate(self.client.get(&url))
+            .send()
+            .await
+        {
             Ok(resp) => Ok(resp.status().is_success()),
             Err(e) => Err(EngineError::NetworkError(e.to_string())),
         }
+    }
+
+    async fn is_ready(&self) -> bool {
+        let response = match crate::observability::propagate(self.client.get(&self.horizon_url))
+            .send()
+            .await
+        {
+            Ok(response) if response.status().is_success() => response,
+            _ => return false,
+        };
+        let body: serde_json::Value = match response.json().await {
+            Ok(body) => body,
+            Err(_) => return false,
+        };
+        let closed = body["history_latest_ledger_close_time"]
+            .as_str()
+            .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok());
+        closed.is_some_and(|time| {
+            let age = chrono::Utc::now()
+                .signed_duration_since(time.with_timezone(&chrono::Utc))
+                .num_seconds();
+            (0..=30).contains(&age)
+        })
     }
 
     fn name(&self) -> &'static str {
