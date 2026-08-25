@@ -14,6 +14,7 @@ impl IntoResponse for EngineError {
         let status = match self.http_status() {
             404 => StatusCode::NOT_FOUND,
             400 => StatusCode::BAD_REQUEST,
+            409 => StatusCode::CONFLICT,
             _ => StatusCode::INTERNAL_SERVER_ERROR,
         };
         let code = match &self {

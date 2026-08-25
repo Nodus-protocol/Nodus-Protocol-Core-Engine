@@ -196,6 +196,102 @@ Contributions are welcome. Please read [CONTRIBUTING.md](CONTRIBUTING.md) before
 
 ---
 
+## Service Authentication
+
+Every endpoint except `/healthz`, `/readyz`, and `/metrics` requires a signed
+request from a known workload identity — there is no anonymous or IP-based
+trust, even inside a private network. Those three stay open because they
+carry no privileged data (a liveness probe, a readiness summary, and
+Prometheus-style counters — see `src/observability.rs`) and load balancers
+and scrapers need to reach them without a signing key. This is the
+Backend-to-Engine protocol; see [`src/auth.rs`](src/auth.rs) for the
+reference implementation.
+
+### Signing a request
+
+Send these headers on every call:
+
+| Header | Value |
+|---|---|
+| `X-Nodus-Key-Id` | Your workload's key identifier |
+| `X-Nodus-Timestamp` | Unix seconds when the request was signed |
+| `X-Nodus-Nonce` | A unique-per-request opaque string (e.g. a UUID) |
+| `X-Nodus-Scope` | The scope this request claims — must match the endpoint |
+| `X-Nodus-Network` | `mainnet` or `testnet` — must match the engine's deployment |
+| `X-Nodus-Signature` | `hex(HMAC-SHA256(secret, canonical_string))` |
+
+```
+canonical_string = "{METHOD}\n{PATH}\n{sha256_hex(body)}\n{timestamp}\n{nonce}\n{scope}\n{network}"
+```
+
+`PATH` is the request path with no query string. `sha256_hex(body)` is the
+hex-encoded SHA-256 digest of the raw request body (`sha256("")` for a
+request with no body). Binding method, path, body digest, timestamp, nonce,
+scope, and network into one signature means a captured request cannot be
+replayed, tampered with, retargeted at a different endpoint, escalated to a
+higher-privilege scope, or forwarded to the wrong network — each of those
+changes the canonical string and invalidates the signature.
+
+### Scopes
+
+| Scope | Covers |
+|---|---|
+| `read` | Quotes, balances, payment/webhook listings |
+| `tx_construct` | Building an unsigned transaction envelope; no chain effect |
+| `tx_submit` | Submitting a payment or transaction for settlement |
+| `admin` | Webhook subscription management |
+| `diagnostics` | Reserved for future debug endpoints beyond `/healthz` |
+
+A key only grants what it needs (see `ENGINE_AUTH_KEYS` in `.env.example`).
+A signature is only valid for the single scope it was signed for, and the
+engine rejects it outright if the scope doesn't match what the target
+endpoint requires.
+
+### Replay protection
+
+Every `(key_id, nonce)` pair is recorded durably (Redis when `REDIS_URL` is
+set, in-memory otherwise) for `ENGINE_AUTH_REPLAY_WINDOW_SECS`. A repeated
+nonce is rejected with `409 Conflict`. Timestamps outside
+`ENGINE_AUTH_CLOCK_SKEW_SECS` of the engine's clock are rejected with `401`
+regardless of nonce state.
+
+### Rotating credentials without downtime
+
+`ENGINE_AUTH_KEYS` accepts multiple active key entries at once. To rotate a
+secret: add a new `key_id:secret:scopes` entry, redeploy, switch the caller
+over to the new key, then remove the old entry in a later deploy. Both keys
+work simultaneously in between — no restart-induced auth outage.
+
+### CORS
+
+`CORS_ALLOWED_ORIGINS` is an explicit comma-separated origin allow-list.
+Leave it unset for an internal-only deployment: with no origins configured
+the engine attaches no CORS layer at all, so browsers refuse cross-origin
+responses outright (no permissive `*` wildcard is ever used). Set it only
+when a browser genuinely needs to call the engine directly.
+
+### Transport
+
+The engine speaks plain HTTP itself and expects TLS to be terminated in
+front of it (load balancer, ingress, or a service-mesh mTLS sidecar). Set
+`TLS_TERMINATED_UPSTREAM=true` once that's in place — the engine refuses to
+start on `NETWORK=mainnet` without it (`ENGINE_ALLOW_INSECURE_TRANSPORT=true`
+is a local-dev-only override).
+
+### Rate, size, and concurrency limits
+
+Requests are capped per authenticated workload and scope (stricter for
+`tx_submit`/`admin` than `read`), bodies are capped at 256 KiB, and each
+scope group has its own concurrency ceiling — so a burst against one
+endpoint tier can't starve another.
+
+### Local development
+
+Set `ENGINE_AUTH_DISABLED=true` to skip signature verification (testnet
+only — the engine refuses to start with this set on `NETWORK=mainnet`).
+
+---
+
 ## Security
 
 If you discover a vulnerability, please **do not** open a public issue. Contact the team privately at **security@nodusprotocol.io**.
