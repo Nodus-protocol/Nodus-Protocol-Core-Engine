@@ -53,5 +53,16 @@ jobs:
           echo "AMM constants verified in sync with Smart Contract."
       - name: Test
         run: cargo test --all-features
+      - name: Validate release promotion gate
+        run: |
+          python3 -m unittest discover -s release/tests -v
+          python3 -m json.tool release/config/promotion-policy.json >/dev/null
+          python3 -m json.tool release/examples/capacity-report.json >/dev/null
+          python3 -m json.tool release/examples/promotion-evidence.json >/dev/null
+          bash -n release/scripts/run-capacity.sh
+          bash -n release/scripts/run-fault.sh
+          bash -n release/scripts/create-manifest.sh
+          bash -n release/scripts/run-canary.sh
+          bash -n release/scripts/setup-proxies.sh
       - name: Build
         run: cargo build --release
