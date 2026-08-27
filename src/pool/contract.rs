@@ -1,4 +1,3 @@
-use base64::{engine::general_purpose::STANDARD as B64, Engine};
 use serde::Serialize;
 use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
@@ -146,23 +145,49 @@ impl ContractClient {
         })
     }
 
-    /// **Known limitation:** this queries an `"LpBalance"` key on the pool
-    /// contract's own instance storage. In the currently deployed contract
-    /// (see `contracts/pool/src/lib.rs` /
-    /// `contracts/pool/src/storage.rs::DataKey` in
-    /// `Nodus-protocol/Nodus-Protocol-Smart-Contract`), LP balances and
-    /// total supply live on a separate SEP-41 LP token contract
-    /// (`DataKey::LpToken`), not in the pool's own storage — that key does
-    /// not exist here, so this always resolves to `0`. Left as pre-existing
-    /// behavior; fixing it requires querying the LP token contract address
-    /// (tracked separately from this transaction-preparation work).
+    /// Reads a holder's LP-token balance from the SEP-41 LP token contract
+    /// for this pool. The LP token address is itself read from the pool
+    /// contract's typed instance storage (`DataKey::LpToken`), so this
+    /// always queries the *actual* deployed LP token contract rather than
+    /// assuming it lives on the pool — an `"LpBalance"`-on-pool assumption
+    /// that previously resolved to `0` for every holder.
     pub async fn lp_balance(&self, address: &str) -> Result<u128, EngineError> {
-        let key_xdr = self.lp_balance_key_xdr(address)?;
+        let lp_token = self.lp_token_address().await?;
+        let key = xdr::sepal41_balance_key(address)?;
+        let key_xdr = xdr::contract_persistent_ledger_key(&lp_token, key)?;
         let entries = self.rpc.get_ledger_entries(vec![key_xdr]).await?;
-        if entries.is_empty() {
-            return Ok(0);
-        }
-        parse_i128_from_xdr(&entries[0].xdr)
+        let entry = match entries.first() {
+            Some(entry) => entry,
+            // No entry means the holder has never received LP tokens (0).
+            None => return Ok(0),
+        };
+        let val = xdr::decode_contract_data_val(&entry.xdr)?;
+        i128_to_u128(xdr::scval_to_i128(&val)?).ok_or_else(|| {
+            EngineError::Internal("LP token balance is negative or overflowed u128".into())
+        })
+    }
+
+    /// Resolves the pool's own tracked LP token contract address
+    /// (`DataKey::LpToken`) from the pool's typed instance storage.
+    async fn lp_token_address(&self) -> Result<String, EngineError> {
+        let map = self.fetch_pool_instance_map().await?;
+        let lp_token_addr = xdr::instance_address(&map, "LpToken")?;
+        Ok(xdr::address_to_string(&lp_token_addr))
+    }
+
+    /// Reads the `TotalSupply` instance value from a specific LP token
+    /// contract.
+    async fn read_lp_total_supply(&self, lp_token: &str) -> Result<u128, EngineError> {
+        let key_xdr = xdr::contract_instance_ledger_key(lp_token)?;
+        let entries = self.rpc.get_ledger_entries(vec![key_xdr]).await?;
+        let entry = entries.first().ok_or_else(|| {
+            EngineError::NotFound(format!("LP token contract {lp_token} instance not found"))
+        })?;
+        let map = xdr::decode_instance_storage(&entry.xdr)?;
+        let supply = xdr::instance_i128(&map, "TotalSupply")?;
+        i128_to_u128(supply).ok_or_else(|| {
+            EngineError::Internal("LP token total supply is negative or overflowed u128".into())
+        })
     }
 
     /// Builds, simulates, and returns a ready-to-sign `swap` transaction.
@@ -329,130 +354,54 @@ impl ContractClient {
     }
 
     async fn fetch_reserves(&self) -> Result<PoolReserves, EngineError> {
+        let map = self.fetch_pool_instance_map().await?;
+
+        let reserve_0 = xdr::instance_i128(&map, "Reserve0").and_then(|v| {
+            i128_to_u128(v).ok_or_else(|| {
+                EngineError::Internal("Reserve0 is negative or overflowed u128".into())
+            })
+        })?;
+        let reserve_1 = xdr::instance_i128(&map, "Reserve1").and_then(|v| {
+            i128_to_u128(v).ok_or_else(|| {
+                EngineError::Internal("Reserve1 is negative or overflowed u128".into())
+            })
+        })?;
+        let timestamp_last = xdr::instance_u64(&map, "TimestampLast")?;
+
+        // LP total supply is not part of the pool's own storage: it lives on
+        // the SEP-41 LP token contract (see the pool's DataKey::LpToken). Read
+        // it from the actual LP token contract instance rather than scanning
+        // the pool for an "LpTotalSup" fragment that does not exist.
+        let lp_token = xdr::address_to_string(&xdr::instance_address(&map, "LpToken")?);
+        let lp_total_supply = self.read_lp_total_supply(&lp_token).await?;
+
+        Ok(PoolReserves {
+            reserve_0,
+            reserve_1,
+            token_0: self.pool.token_0.clone(),
+            token_1: self.pool.token_1.clone(),
+            lp_total_supply,
+            timestamp_last,
+        })
+    }
+
+    /// Reads and decodes the pool contract's typed instance storage map
+    /// exactly once per call, emitting the source-ledger gauge.
+    async fn fetch_pool_instance_map(&self) -> Result<xdr::ScMap, EngineError> {
         let key = xdr::contract_instance_ledger_key(self.contract_id())?;
         let entries = self.rpc.get_ledger_entries(vec![key]).await?;
 
-        if entries.is_empty() {
-            return Err(EngineError::NotFound("contract instance not found".into()));
-        }
-
-        if let Some(ledger) = entries[0].last_modified {
+        let entry = entries
+            .first()
+            .ok_or_else(|| EngineError::NotFound("contract instance not found".into()))?;
+        if let Some(ledger) = entry.last_modified {
             crate::observability::gauge("nodus_quote_source_ledger", ledger as f64);
         }
         crate::observability::gauge("nodus_provider_divergence_ledgers", 0.0);
-        parse_instance_storage(&entries[0].xdr, &self.pool.token_0, &self.pool.token_1)
-    }
-
-    fn lp_balance_key_xdr(&self, address: &str) -> Result<String, EngineError> {
-        let contract_bytes = parse_contract_id(self.contract_id())?;
-        let addr_bytes = parse_contract_id(address)?;
-        let mut buf = Vec::new();
-        buf.extend_from_slice(&2u32.to_be_bytes()); // CONTRACT_DATA
-        buf.extend_from_slice(&1u32.to_be_bytes()); // ScAddress::Contract
-        buf.extend_from_slice(&contract_bytes);
-        // key: SCVec [ SCSymbol("LpBalance"), ScAddress::Contract(address) ]
-        buf.extend_from_slice(&11u32.to_be_bytes()); // SCV_VEC
-        buf.extend_from_slice(&2u32.to_be_bytes()); // vec length = 2
-        buf.extend_from_slice(&7u32.to_be_bytes()); // SCV_SYMBOL
-        let sym = b"LpBalance";
-        buf.extend_from_slice(&(sym.len() as u32).to_be_bytes());
-        buf.extend_from_slice(sym);
-        pad4(&mut buf, sym.len());
-        buf.extend_from_slice(&6u32.to_be_bytes()); // SCV_ADDRESS
-        buf.extend_from_slice(&1u32.to_be_bytes()); // ScAddress::Contract
-        buf.extend_from_slice(&addr_bytes);
-        buf.extend_from_slice(&1u32.to_be_bytes()); // Persistent
-        Ok(B64.encode(&buf))
+        xdr::decode_instance_storage(&entry.xdr)
     }
 }
 
-fn parse_contract_id(id: &str) -> Result<Vec<u8>, EngineError> {
-    let clean = id.trim_start_matches("C");
-    hex::decode(clean)
-        .or_else(|_| {
-            B64.decode(id)
-                .map_err(|_| EngineError::InvalidRequest(format!("invalid contract id: {id}")))
-        })
-        .and_then(|b| {
-            if b.len() == 32 {
-                Ok(b)
-            } else {
-                Err(EngineError::InvalidRequest(format!(
-                    "contract id must be 32 bytes: {id}"
-                )))
-            }
-        })
-}
-
-fn pad4(buf: &mut Vec<u8>, len: usize) {
-    let rem = len % 4;
-    if rem != 0 {
-        buf.extend(std::iter::repeat_n(0u8, 4 - rem));
-    }
-}
-
-fn parse_i128_from_xdr(xdr: &str) -> Result<u128, EngineError> {
-    let bytes = B64
-        .decode(xdr)
-        .map_err(|e| EngineError::Internal(format!("decode xdr: {e}")))?;
-    // ScVal::I128 is encoded as: type(SCV_I128=8), hi(i64 BE), lo(u64 BE)
-    if bytes.len() < 20 {
-        return Ok(0);
-    }
-    let hi = i64::from_be_bytes(bytes[4..12].try_into().unwrap_or([0; 8]));
-    let lo = u64::from_be_bytes(bytes[12..20].try_into().unwrap_or([0; 8]));
-    if hi < 0 {
-        return Ok(0);
-    }
-    Ok((hi as u128) << 64 | lo as u128)
-}
-
-fn parse_instance_storage(
-    xdr: &str,
-    token_0: &str,
-    token_1: &str,
-) -> Result<PoolReserves, EngineError> {
-    // Minimal parsing: extract Reserve0 and Reserve1 i128 values from the instance XDR.
-    // Full XDR parsing requires stellar-xdr crate; this is a structural approximation.
-    // Contributors should replace with stellar-xdr deserialization for production.
-    let bytes = B64
-        .decode(xdr)
-        .map_err(|e| EngineError::Internal(format!("decode instance xdr: {e}")))?;
-
-    let reserve_0 = extract_i128_by_key(&bytes, b"Reserve0").unwrap_or(0);
-    let reserve_1 = extract_i128_by_key(&bytes, b"Reserve1").unwrap_or(0);
-    let lp_supply = extract_i128_by_key(&bytes, b"LpTotalSup").unwrap_or(0);
-    let ts = extract_u64_by_key(&bytes, b"TimestampL").unwrap_or(0);
-
-    Ok(PoolReserves {
-        reserve_0,
-        reserve_1,
-        token_0: token_0.to_string(),
-        token_1: token_1.to_string(),
-        lp_total_supply: lp_supply,
-        timestamp_last: ts,
-    })
-}
-
-fn extract_i128_by_key(buf: &[u8], key: &[u8]) -> Option<u128> {
-    let pos = buf.windows(key.len()).position(|w| w == key)?;
-    let start = pos + key.len();
-    if start + 16 > buf.len() {
-        return None;
-    }
-    let hi = i64::from_be_bytes(buf[start..start + 8].try_into().ok()?);
-    let lo = u64::from_be_bytes(buf[start + 8..start + 16].try_into().ok()?);
-    if hi < 0 {
-        return Some(0);
-    }
-    Some((hi as u128) << 64 | lo as u128)
-}
-
-fn extract_u64_by_key(buf: &[u8], key: &[u8]) -> Option<u64> {
-    let pos = buf.windows(key.len()).position(|w| w == key)?;
-    let start = pos + key.len();
-    if start + 8 > buf.len() {
-        return None;
-    }
-    Some(u64::from_be_bytes(buf[start..start + 8].try_into().ok()?))
+fn i128_to_u128(v: i128) -> Option<u128> {
+    u128::try_from(v).ok()
 }

@@ -8,16 +8,18 @@
 //! that only fails once it reaches Soroban RPC or the network.
 
 use stellar_xdr::curr::{
-    AccountId, ContractId, Hash, HostFunction, Int128Parts, InvokeContractArgs,
-    InvokeHostFunctionOp, LedgerKey, LedgerKeyAccount, LedgerKeyContractData, Limits, Memo,
-    MuxedAccount, Operation, OperationBody, Preconditions, PublicKey, ScAddress, ScSymbol, ScVal,
-    SequenceNumber, SorobanAuthorizationEntry, SorobanTransactionData, StringM, TimeBounds,
-    TimePoint, Transaction, TransactionEnvelope, TransactionExt, TransactionV1Envelope, Uint256,
-    VecM, WriteXdr,
+    AccountId, ContractDataDurability, ContractId, Hash, HostFunction, Int128Parts,
+    InvokeContractArgs, InvokeHostFunctionOp, LedgerEntryData, LedgerKey, LedgerKeyAccount,
+    LedgerKeyContractData, Limits, Memo, MuxedAccount, Operation, OperationBody, Preconditions,
+    PublicKey, ReadXdr, ScAddress, ScContractInstance, ScSymbol, ScVal, ScVec, SequenceNumber,
+    SorobanAuthorizationEntry, SorobanTransactionData, StringM, TimeBounds, TimePoint, Transaction,
+    TransactionEnvelope, TransactionExt, TransactionV1Envelope, Uint256, VecM, WriteXdr,
 };
 
 use crate::pool::abi::PoolFunction;
 use crate::utils::EngineError;
+
+pub use stellar_xdr::curr::ScMap;
 
 fn xdr_err(context: &str, e: impl std::fmt::Display) -> EngineError {
     EngineError::Internal(format!("xdr: {context}: {e}"))
@@ -147,10 +149,124 @@ pub fn contract_instance_ledger_key(contract: &str) -> Result<String, EngineErro
     let key = LedgerKey::ContractData(LedgerKeyContractData {
         contract: address,
         key: ScVal::LedgerKeyContractInstance,
-        durability: stellar_xdr::curr::ContractDataDurability::Persistent,
+        durability: ContractDataDurability::Persistent,
     });
     key.to_xdr_base64(Limits::none())
         .map_err(|e| xdr_err("contract instance ledger key", e))
+}
+
+/// Builds a typed, persistent `LedgerKeyContractData` for a contract's
+/// `Persistent` storage under a caller-supplied `ScVal` key. Used for
+/// SEP-41 style keys (e.g. `Balance(Address)`) which live in persistent
+/// storage rather than the contract instance.
+pub fn contract_persistent_ledger_key(contract: &str, key: ScVal) -> Result<String, EngineError> {
+    let address = parse_address(contract)?;
+    let ledger_key = LedgerKey::ContractData(LedgerKeyContractData {
+        contract: address,
+        key,
+        durability: ContractDataDurability::Persistent,
+    });
+    ledger_key
+        .to_xdr_base64(Limits::none())
+        .map_err(|e| xdr_err("contract persistent ledger key", e))
+}
+
+/// The SEP-41 `balance(Address)` storage key for a holder: a persistent
+/// `ScVal::Vec([Symbol("Balance"), Address(holder)])`, exactly as the
+/// `#[contracttype] enum DataKey { Balance(Address) }` in the LP-token
+/// contract serializes. Building this through real `ScVal`s (rather than
+/// hand-typed tag bytes) keeps the on-ledger key in lockstep with the
+/// Soroban SDK's own encoding.
+pub fn sepal41_balance_key(holder: &str) -> Result<ScVal, EngineError> {
+    let holder_addr = parse_address(holder)?;
+    let entries = vec![
+        ScVal::Symbol(symbol("Balance")?),
+        ScVal::Address(holder_addr),
+    ];
+    Ok(ScVal::Vec(Some(ScVec(
+        VecM::try_from(entries).map_err(|e| xdr_err("sepal41 balance key", e))?,
+    ))))
+}
+
+// ── Typed ContractData decoding ─────────────────────────────────────────────
+
+/// Decodes a `LedgerEntryData::ContractData` payload and returns its
+/// `ScVal` value. Rejects anything that is not a `ContractData` entry so a
+/// wrong-kind ledger entry can never be interpreted as pool state.
+pub fn decode_contract_data_val(entry_xdr: &str) -> Result<ScVal, EngineError> {
+    let data = LedgerEntryData::from_xdr_base64(entry_xdr, Limits::none())
+        .map_err(|e| xdr_err("decode contract data entry", e))?;
+    match data {
+        LedgerEntryData::ContractData(cd) => Ok(cd.val),
+        other => Err(EngineError::Internal(format!(
+            "expected ContractData ledger entry, got {other:?}"
+        ))),
+    }
+}
+
+/// Extracts the instance `ScMap` (the contract's instance storage) from a
+/// contract-instance `ContractData` ledger entry. Returns an empty map when
+/// the instance has no storage populated so far; errors when the entry kind
+/// is wrong, the value isn't a `ScVal::ContractInstance`, or the storage
+/// isn't a map (defense in depth — a structurally-valid-but-wrong XDR must
+/// fail loudly, not be scanned for byte fragments).
+pub fn decode_instance_storage(entry_xdr: &str) -> Result<ScMap, EngineError> {
+    let data = LedgerEntryData::from_xdr_base64(entry_xdr, Limits::none())
+        .map_err(|e| xdr_err("decode contract instance entry", e))?;
+    let LedgerEntryData::ContractData(cd) = data else {
+        return Err(EngineError::Internal(format!(
+            "expected a ContractData ledger entry to read contract instance storage, got {data:?}"
+        )));
+    };
+    let ScVal::ContractInstance(ScContractInstance {
+        storage: Some(map), ..
+    }) = cd.val
+    else {
+        return Err(EngineError::Internal(
+            "contract instance value has no typed storage map".into(),
+        ));
+    };
+    Ok(map)
+}
+
+/// Reads the `ScVal::I128` bound to a `Symbol(name)` key inside an instance
+/// storage map. Missing key, non-I128 value, and wrong-type value each fail
+/// — pool reserves must be typed, not inferred from byte offsets.
+pub fn instance_i128(map: &ScMap, name: &str) -> Result<i128, EngineError> {
+    let val = instance_lookup(map, name)?;
+    scval_to_i128(val)
+}
+
+/// Reads the `ScVal::U64` bound to a `Symbol(name)` key inside an instance
+/// storage map (used for `TimestampLast`).
+pub fn instance_u64(map: &ScMap, name: &str) -> Result<u64, EngineError> {
+    let val = instance_lookup(map, name)?;
+    scval_to_u64(val)
+}
+
+/// Reads the `ScVal::Address` bound to a `Symbol(name)` key inside an
+/// instance storage map (used for `LpToken`).
+pub fn instance_address(map: &ScMap, name: &str) -> Result<ScAddress, EngineError> {
+    let val = instance_lookup(map, name)?;
+    match val {
+        ScVal::Address(addr) => Ok(addr.clone()),
+        other => Err(EngineError::Internal(format!(
+            "instance key '{name}': expected ScVal::Address, got {other:?}"
+        ))),
+    }
+}
+
+fn instance_lookup<'a>(map: &'a ScMap, name: &str) -> Result<&'a ScVal, EngineError> {
+    for entry in map.0.as_slice() {
+        if let ScVal::Symbol(sym) = &entry.key {
+            if sym.0.as_slice() == name.as_bytes() {
+                return Ok(&entry.val);
+            }
+        }
+    }
+    Err(EngineError::Internal(format!(
+        "instance storage is missing required key '{name}'"
+    )))
 }
 
 // ── Transaction envelope construction ───────────────────────────────────────
