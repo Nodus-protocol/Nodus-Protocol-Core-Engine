@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use nodus_core_engine::adapters::mock::MockAdapter;
 use nodus_core_engine::engine::Engine;
-use nodus_core_engine::idempotency::MemoryIdempotencyStore;
+use nodus_core_engine::idempotency::{MemoryClaimStore, MemoryIdempotencyStore};
 use nodus_core_engine::retry::RetryConfig;
 use nodus_core_engine::utils::{PaymentStatus, Urgency};
 
@@ -11,8 +11,17 @@ fn memory_store() -> Arc<MemoryIdempotencyStore> {
     Arc::new(MemoryIdempotencyStore::new(Duration::from_secs(86_400)))
 }
 
+fn claim_store() -> Arc<MemoryClaimStore> {
+    Arc::new(MemoryClaimStore::new())
+}
+
 fn engine_with_mock(mock: MockAdapter) -> Engine {
-    Engine::new(vec![Arc::new(mock)], RetryConfig::new(1, 0), memory_store())
+    Engine::new(
+        vec![Arc::new(mock)],
+        RetryConfig::new(1, 0),
+        memory_store(),
+        claim_store(),
+    )
 }
 
 const ALICE: &str = "GAHJJJKMOKYE4RVPZEWZTKH5FVI4PA3VL7GK2LFNUBSGBV7REEX6XCLD";

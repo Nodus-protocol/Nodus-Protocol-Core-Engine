@@ -107,7 +107,10 @@ async fn main() {
         Duration::from_secs(cfg.idempotency_ttl_secs),
     )
     .await;
-    let engine = Arc::new(Engine::new(vec![stellar], retry_config, idempotency));
+    let claims = idempotency::create_claim_store(cfg.redis_url.as_deref(), cfg.network)
+        .await
+        .expect("idempotency claim store unavailable");
+    let engine = Arc::new(Engine::new(vec![stellar], retry_config, idempotency, claims));
     let webhooks = Arc::new(WebhookStore::new());
     let rates = RateService::new();
 
