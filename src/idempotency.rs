@@ -6,8 +6,137 @@ use dashmap::DashMap;
 use redis::aio::ConnectionManager;
 use redis::AsyncCommands;
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 
 use crate::utils::EngineError;
+
+/// Deployment-environment segment of an idempotency key.
+///
+/// Read from `NODUS_ENV` and kept separate from [`crate::config::Network`] so
+/// that, for example, a mainnet engine running in a staging cell never shares
+/// idempotency state with the real production mainnet engine.
+pub fn idempotency_environment() -> String {
+    std::env::var("NODUS_ENV")
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| "default".to_string())
+}
+
+/// Fully-qualified namespace for idempotency keys.
+///
+/// Two requests can only collide on a key when they share the same
+/// environment, network, and endpoint. The client-chosen key is the final
+/// segment, so a key reused across endpoints (or networks) is treated as an
+/// entirely separate operation rather than a replay.
+#[derive(Debug, Clone)]
+pub struct IdempotencyNamespace {
+    environment: String,
+    network: &'static str,
+    endpoint: &'static str,
+}
+
+impl IdempotencyNamespace {
+    /// `network` is `"mainnet"` / `"testnet"`; `endpoint` is a stable dotted
+    /// identifier for the operation, e.g. `"payments.initiate"`.
+    pub fn new(network: &'static str, endpoint: &'static str) -> Self {
+        Self {
+            environment: idempotency_environment(),
+            network,
+            endpoint,
+        }
+    }
+
+    /// Store key for a client-supplied idempotency key.
+    pub fn key(&self, client_key: &str) -> String {
+        format!(
+            "nodus:idem:{}:{}:{}:{}",
+            self.environment, self.network, self.endpoint, client_key
+        )
+    }
+
+    pub fn endpoint(&self) -> &'static str {
+        self.endpoint
+    }
+}
+
+/// Stable SHA-256 fingerprint of a request body.
+///
+/// Object keys are sorted recursively before hashing, so two logically
+/// identical payloads that differ only in key ordering (or whitespace)
+/// produce the same fingerprint. A second request that presents the same
+/// idempotency key with a *different* fingerprint is a client error, not a
+/// replay.
+pub fn request_fingerprint(body: &Value) -> String {
+    let mut canonical = Vec::new();
+    write_canonical(body, &mut canonical);
+    hex::encode(Sha256::digest(&canonical))
+}
+
+fn write_canonical(value: &Value, out: &mut Vec<u8>) {
+    match value {
+        Value::Object(map) => {
+            let mut keys: Vec<&String> = map.keys().collect();
+            keys.sort_unstable();
+            out.push(b'{');
+            for (i, key) in keys.iter().enumerate() {
+                if i > 0 {
+                    out.push(b',');
+                }
+                out.extend_from_slice(format!("{key:?}").as_bytes());
+                out.push(b':');
+                write_canonical(&map[*key], out);
+            }
+            out.push(b'}');
+        }
+        Value::Array(items) => {
+            out.push(b'[');
+            for (i, item) in items.iter().enumerate() {
+                if i > 0 {
+                    out.push(b',');
+                }
+                write_canonical(item, out);
+            }
+            out.push(b']');
+        }
+        other => out.extend_from_slice(other.to_string().as_bytes()),
+    }
+}
+
+#[cfg(test)]
+mod namespace_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn key_includes_environment_network_and_endpoint() {
+        let ns = IdempotencyNamespace::new("mainnet", "payments.initiate");
+        let key = ns.key("abc-123");
+        assert!(key.starts_with("nodus:idem:"));
+        assert!(key.ends_with(":mainnet:payments.initiate:abc-123"));
+    }
+
+    #[test]
+    fn same_client_key_on_different_endpoints_does_not_collide() {
+        let a = IdempotencyNamespace::new("mainnet", "payments.initiate").key("k");
+        let b = IdempotencyNamespace::new("mainnet", "payments.batch").key("k");
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn fingerprint_is_stable_across_key_ordering() {
+        let a = request_fingerprint(&json!({"a": 1, "b": {"x": 1, "y": 2}}));
+        let b = request_fingerprint(&json!({"b": {"y": 2, "x": 1}, "a": 1}));
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn fingerprint_changes_with_value() {
+        let a = request_fingerprint(&json!({"amount": 100}));
+        let b = request_fingerprint(&json!({"amount": 101}));
+        assert_ne!(a, b);
+    }
+}
 
 #[async_trait]
 pub trait IdempotencyStore: Send + Sync {
