@@ -3,25 +3,16 @@ use std::time::Duration;
 
 use nodus_core_engine::adapters::mock::MockAdapter;
 use nodus_core_engine::engine::Engine;
-use nodus_core_engine::idempotency::{MemoryClaimStore, MemoryIdempotencyStore};
+use nodus_core_engine::idempotency::{ClaimOutcome, ClaimStore, MemoryClaimStore};
 use nodus_core_engine::retry::RetryConfig;
 use nodus_core_engine::utils::{PaymentStatus, Urgency};
-
-fn memory_store() -> Arc<MemoryIdempotencyStore> {
-    Arc::new(MemoryIdempotencyStore::new(Duration::from_secs(86_400)))
-}
 
 fn claim_store() -> Arc<MemoryClaimStore> {
     Arc::new(MemoryClaimStore::new())
 }
 
 fn engine_with_mock(mock: MockAdapter) -> Engine {
-    Engine::new(
-        vec![Arc::new(mock)],
-        RetryConfig::new(1, 0),
-        memory_store(),
-        claim_store(),
-    )
+    Engine::new(vec![Arc::new(mock)], RetryConfig::new(1, 0), claim_store())
 }
 
 const ALICE: &str = "GAHJJJKMOKYE4RVPZEWZTKH5FVI4PA3VL7GK2LFNUBSGBV7REEX6XCLD";
@@ -142,17 +133,30 @@ async fn simulation_returns_fee_estimate() {
 }
 
 #[tokio::test]
-async fn idempotency_returns_cached_response() {
-    let engine = engine_with_mock(MockAdapter::new("mock"));
-    let body = serde_json::json!({"id": "cached-payment-id"});
+async fn a_completed_claim_replays_its_recorded_response() {
+    let store = MemoryClaimStore::new();
+    let lease = Duration::from_secs(30);
+    let ttl = Duration::from_secs(86_400);
+    let body = serde_json::json!({"id": "recorded-payment-id"});
 
-    engine
-        .idempotency()
-        .set("key-001".to_string(), body.clone())
+    let token = match store
+        .claim("key-001", "fp", "owner-1", lease, ttl)
         .await
-        .unwrap();
-    let result = engine.idempotency().get("key-001").await.unwrap();
-    assert_eq!(result.unwrap(), body);
+        .unwrap()
+    {
+        ClaimOutcome::Claimed(t) => t,
+        other => panic!("expected a fresh claim, got {other:?}"),
+    };
+    store.complete(&token, &body, Some("tx-1"), ttl).await.unwrap();
+
+    match store
+        .claim("key-001", "fp", "owner-2", lease, ttl)
+        .await
+        .unwrap()
+    {
+        ClaimOutcome::Replay { response } => assert_eq!(response, body),
+        other => panic!("expected a replay, got {other:?}"),
+    }
 }
 
 #[tokio::test]

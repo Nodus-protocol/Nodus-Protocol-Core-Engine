@@ -7,7 +7,6 @@ use uuid::Uuid;
 use crate::adapters::ChainAdapter;
 use crate::idempotency::{
     request_fingerprint, ClaimOutcome, ClaimStore, ClaimToken, IdempotencyNamespace,
-    IdempotencyStore,
 };
 use crate::retry::{retry, RetryConfig};
 use crate::router::Router;
@@ -22,7 +21,6 @@ const CLAIM_LEASE: Duration = Duration::from_secs(30);
 pub struct Engine {
     router: Router,
     store: PaymentStore,
-    idempotency: Arc<dyn IdempotencyStore>,
     claims: Arc<dyn ClaimStore>,
     retry_config: RetryConfig,
 }
@@ -31,20 +29,14 @@ impl Engine {
     pub fn new(
         adapters: Vec<Arc<dyn ChainAdapter>>,
         retry_config: RetryConfig,
-        idempotency: Arc<dyn IdempotencyStore>,
         claims: Arc<dyn ClaimStore>,
     ) -> Self {
         Self {
             router: Router::new(adapters),
             store: PaymentStore::new(),
-            idempotency,
             claims,
             retry_config,
         }
-    }
-
-    pub fn idempotency(&self) -> &dyn IdempotencyStore {
-        &*self.idempotency
     }
 
     pub fn claims(&self) -> &dyn ClaimStore {
