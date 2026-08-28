@@ -238,6 +238,93 @@ mod record_tests {
     }
 }
 
+/// Proof that the holder owns the in-flight claim for `key`. Required to
+/// advance the claim to `Submitting` or `Completed`; a token whose `owner`
+/// no longer matches the stored record is rejected with
+/// [`EngineError::Conflict`].
+#[derive(Debug, Clone)]
+pub struct ClaimToken {
+    pub(crate) key: String,
+    pub(crate) owner: String,
+}
+
+impl ClaimToken {
+    pub fn key(&self) -> &str {
+        &self.key
+    }
+}
+
+/// Disposition of a [`ClaimStore::claim`] call.
+#[derive(Debug)]
+pub enum ClaimOutcome {
+    /// A fresh claim was created; the caller owns it and must execute the work.
+    Claimed(ClaimToken),
+    /// An abandoned `InFlight` lease was taken over. No side effect had
+    /// occurred, so the caller executes the work from scratch.
+    TookOver(ClaimToken),
+    /// Another owner holds a live lease. The caller must not execute; it
+    /// should retry the request shortly to pick up the eventual result.
+    InFlight,
+    /// A previous attempt reached the submission stage but never recorded a
+    /// final result. The outcome is unknown: the caller must reconcile
+    /// `execution_ref` out of band and must never submit again under this key.
+    AwaitingResult { execution_ref: String },
+    /// A final response already exists; replay it verbatim.
+    Replay { response: Value },
+}
+
+/// Atomic claim / result protocol for idempotent execution.
+///
+/// A single [`claim`](ClaimStore::claim) call both reserves an in-flight slot
+/// *and* returns any existing disposition, so two concurrent identical
+/// requests can never both receive `Claimed`. Implementations must perform
+/// the read-decide-write as one indivisible operation (Lua on Redis, a
+/// per-shard entry lock in memory).
+#[async_trait]
+pub trait ClaimStore: Send + Sync {
+    /// Reserve `key` for `owner` with `fingerprint`, or report the existing
+    /// claim's disposition. `lease` bounds how long this owner may hold the
+    /// slot before another worker may take over an `InFlight` claim; `ttl`
+    /// bounds how long the whole record (including a completed response)
+    /// survives. A stored record whose fingerprint differs from `fingerprint`
+    /// is rejected with [`EngineError::Conflict`].
+    async fn claim(
+        &self,
+        key: &str,
+        fingerprint: &str,
+        owner: &str,
+        lease: Duration,
+        ttl: Duration,
+    ) -> Result<ClaimOutcome, EngineError>;
+
+    /// Record `execution_ref` and move the claim to `Submitting` immediately
+    /// before an irreversible external submission. Refreshes the lease.
+    /// Rejected with [`EngineError::Conflict`] if `token` no longer owns the
+    /// claim, or [`EngineError::PreconditionFailed`] if the record has expired.
+    async fn mark_submitting(
+        &self,
+        token: &ClaimToken,
+        execution_ref: &str,
+        lease: Duration,
+        ttl: Duration,
+    ) -> Result<(), EngineError>;
+
+    /// Commit the final `response` (and optional `execution_ref`) so every
+    /// later claim of this key replays it. Rejected with
+    /// [`EngineError::Conflict`] if `token` no longer owns the claim.
+    async fn complete(
+        &self,
+        token: &ClaimToken,
+        response: &Value,
+        execution_ref: Option<&str>,
+        ttl: Duration,
+    ) -> Result<(), EngineError>;
+
+    /// Whether the backing store is reachable. On mainnet a `false` here is a
+    /// fatal readiness failure — there is no in-memory fallback.
+    async fn ready(&self) -> bool;
+}
+
 #[async_trait]
 pub trait IdempotencyStore: Send + Sync {
     async fn get(&self, key: &str) -> Result<Option<Value>, EngineError>;
