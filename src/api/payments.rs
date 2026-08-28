@@ -61,7 +61,13 @@ pub async fn initiate(
     let Some(client_key) = req.idempotency_key.clone() else {
         let payment = ctx
             .engine
-            .initiate(req.sender, req.recipient, req.amount, req.token, req.urgency)
+            .initiate(
+                req.sender,
+                req.recipient,
+                req.amount,
+                req.token,
+                req.urgency,
+            )
             .await?;
         return Ok((StatusCode::CREATED, Json(payment)).into_response());
     };
@@ -92,7 +98,9 @@ pub async fn initiate(
         IdempotentInitiation::Executed(payment) => {
             (StatusCode::CREATED, Json(payment)).into_response()
         }
-        IdempotentInitiation::Replayed(response) => (StatusCode::OK, Json(response)).into_response(),
+        IdempotentInitiation::Replayed(response) => {
+            (StatusCode::OK, Json(response)).into_response()
+        }
     })
 }
 

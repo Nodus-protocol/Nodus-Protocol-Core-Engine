@@ -53,10 +53,6 @@ impl IdempotencyNamespace {
             self.environment, self.network, self.endpoint, client_key
         )
     }
-
-    pub fn endpoint(&self) -> &'static str {
-        self.endpoint
-    }
 }
 
 /// Stable SHA-256 fingerprint of a request body.
@@ -247,12 +243,6 @@ pub struct ClaimToken {
     pub(crate) owner: String,
 }
 
-impl ClaimToken {
-    pub fn key(&self) -> &str {
-        &self.key
-    }
-}
-
 /// Disposition of a [`ClaimStore::claim`] call.
 #[derive(Debug)]
 pub enum ClaimOutcome {
@@ -364,20 +354,6 @@ impl MemoryClaimStore {
         Self {
             records: DashMap::new(),
         }
-    }
-
-    /// Drop records whose TTL (approximated by the lease window plus grace)
-    /// has elapsed. Callers run this on a timer; correctness does not depend
-    /// on it because every decision re-checks expiry inline.
-    pub fn evict_expired(&self) {
-        let now = now_millis();
-        self.records
-            .retain(|_, rec| now < rec.lease_expires_at_ms || matches!(rec.lifecycle, ClaimLifecycle::Completed { .. }));
-    }
-
-    #[cfg(test)]
-    pub(crate) fn peek(&self, key: &str) -> Option<ClaimRecord> {
-        self.records.get(key).map(|r| r.value().clone())
     }
 }
 
@@ -565,7 +541,9 @@ mod memory_claim_tests {
             .await
             .unwrap();
         match s.claim("k", "fp", "successor", LEASE, TTL).await.unwrap() {
-            ClaimOutcome::AwaitingResult { execution_ref } => assert_eq!(execution_ref, "exec-ref-1"),
+            ClaimOutcome::AwaitingResult { execution_ref } => {
+                assert_eq!(execution_ref, "exec-ref-1")
+            }
             other => panic!("expected AwaitingResult, got {other:?}"),
         }
     }
@@ -583,10 +561,7 @@ mod memory_claim_tests {
         };
         // A successor takes over the abandoned lease.
         s.claim("k", "fp", "o2", LEASE, TTL).await.unwrap();
-        let err = s
-            .complete(&stale, &json!({}), None, TTL)
-            .await
-            .unwrap_err();
+        let err = s.complete(&stale, &json!({}), None, TTL).await.unwrap_err();
         assert_eq!(err.http_status(), 409);
     }
 }
@@ -848,7 +823,8 @@ pub async fn create_claim_store(
             Ok(Arc::new(store))
         }
         None if network == crate::config::Network::Mainnet => Err(EngineError::Internal(
-            "idempotency: REDIS_URL is mandatory on mainnet — refusing an in-memory fallback".into(),
+            "idempotency: REDIS_URL is mandatory on mainnet — refusing an in-memory fallback"
+                .into(),
         )),
         None => {
             tracing::warn!(
@@ -866,13 +842,17 @@ mod factory_tests {
 
     #[tokio::test]
     async fn mainnet_without_redis_is_rejected() {
-        let err = create_claim_store(None, Network::Mainnet).await.unwrap_err();
-        assert!(err.to_string().contains("mandatory on mainnet"));
+        match create_claim_store(None, Network::Mainnet).await {
+            Err(e) => assert!(e.to_string().contains("mandatory on mainnet")),
+            Ok(_) => panic!("mainnet without REDIS_URL must be rejected"),
+        }
     }
 
     #[tokio::test]
     async fn testnet_without_redis_falls_back_to_memory() {
-        let store = create_claim_store(None, Network::Testnet).await.unwrap();
+        let store = create_claim_store(None, Network::Testnet)
+            .await
+            .expect("testnet may fall back to the in-memory store");
         assert!(!store.ready().await);
     }
 }

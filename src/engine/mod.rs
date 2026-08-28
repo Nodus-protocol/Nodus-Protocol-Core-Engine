@@ -39,10 +39,6 @@ impl Engine {
         }
     }
 
-    pub fn claims(&self) -> &dyn ClaimStore {
-        &*self.claims
-    }
-
     /// Initiate a payment. This is the non-idempotent path: every call runs
     /// the work. Callers that carry a client idempotency key must go through
     /// [`Engine::initiate_idempotent`] instead.
@@ -94,7 +90,8 @@ impl Engine {
                         serde_json::to_value(&p).unwrap_or_default(),
                     )),
                     _ => Err(EngineError::PreconditionFailed(
-                        "a submission for this idempotency key is in progress; retry shortly".into(),
+                        "a submission for this idempotency key is in progress; retry shortly"
+                            .into(),
                     )),
                 }
             }

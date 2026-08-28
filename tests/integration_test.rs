@@ -147,7 +147,10 @@ async fn a_completed_claim_replays_its_recorded_response() {
         ClaimOutcome::Claimed(t) => t,
         other => panic!("expected a fresh claim, got {other:?}"),
     };
-    store.complete(&token, &body, Some("tx-1"), ttl).await.unwrap();
+    store
+        .complete(&token, &body, Some("tx-1"), ttl)
+        .await
+        .unwrap();
 
     match store
         .claim("key-001", "fp", "owner-2", lease, ttl)
