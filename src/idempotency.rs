@@ -1009,3 +1009,65 @@ fn interpret_write(tag: Option<&str>) -> Result<(), EngineError> {
         ))),
     }
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Fail-closed construction. On mainnet the durable store is mandatory: there
+// is no in-memory fallback, and an unreachable Redis aborts startup.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Build the idempotency claim store for the running network.
+///
+/// * `Some(url)` — connect to Redis and verify reachability; a failure here is
+///   fatal on every network (a configured store that is down is a
+///   misconfiguration, not something to paper over with memory).
+/// * `None` on **mainnet** — returns an error so `main` aborts. A mainnet
+///   engine must never run idempotency in process memory: concurrent
+///   identical submissions would both execute and a restart would forget
+///   every key.
+/// * `None` off mainnet — an in-memory store, with a loud warning. Its
+///   `ready()` reports `false`, so `/readyz` still shows the deployment as
+///   not production-ready.
+pub async fn create_claim_store(
+    redis_url: Option<&str>,
+    network: crate::config::Network,
+) -> Result<Arc<dyn ClaimStore>, EngineError> {
+    match redis_url {
+        Some(url) => {
+            let store = RedisClaimStore::new(url).await?;
+            if !store.ready().await {
+                return Err(EngineError::Internal(
+                    "idempotency: REDIS_URL is set but the store is unreachable".into(),
+                ));
+            }
+            tracing::info!("idempotency store: redis (durable)");
+            Ok(Arc::new(store))
+        }
+        None if network == crate::config::Network::Mainnet => Err(EngineError::Internal(
+            "idempotency: REDIS_URL is mandatory on mainnet — refusing an in-memory fallback".into(),
+        )),
+        None => {
+            tracing::warn!(
+                "idempotency store: IN-MEMORY — not durable, forbidden on mainnet, resets on restart"
+            );
+            Ok(Arc::new(MemoryClaimStore::new()))
+        }
+    }
+}
+
+#[cfg(test)]
+mod factory_tests {
+    use super::*;
+    use crate::config::Network;
+
+    #[tokio::test]
+    async fn mainnet_without_redis_is_rejected() {
+        let err = create_claim_store(None, Network::Mainnet).await.unwrap_err();
+        assert!(err.to_string().contains("mandatory on mainnet"));
+    }
+
+    #[tokio::test]
+    async fn testnet_without_redis_falls_back_to_memory() {
+        let store = create_claim_store(None, Network::Testnet).await.unwrap();
+        assert!(!store.ready().await);
+    }
+}
