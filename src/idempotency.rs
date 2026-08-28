@@ -785,3 +785,227 @@ mod memory_claim_tests {
         assert_eq!(err.http_status(), 409);
     }
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Durable Redis atomic store. Every state transition is a single server-side
+// Lua script, so the read-decide-write cannot interleave across instances.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Reserve the key or report the existing disposition, atomically.
+/// `KEYS[1]` = store key. `ARGV` = fingerprint, owner, lease_ms, ttl_ms, now_ms.
+const CLAIM_LUA: &str = r#"
+local raw = redis.call('GET', KEYS[1])
+local fp, owner, lease_ms, ttl_ms, now_ms =
+    ARGV[1], ARGV[2], tonumber(ARGV[3]), tonumber(ARGV[4]), tonumber(ARGV[5])
+if not raw then
+  local rec = cjson.encode({
+    fingerprint = fp, owner = owner,
+    lease_expires_at_ms = now_ms + lease_ms,
+    created_at_ms = now_ms, lifecycle = 'in_flight'
+  })
+  redis.call('SET', KEYS[1], rec, 'PX', ttl_ms)
+  return {'claimed'}
+end
+local rec = cjson.decode(raw)
+if rec.fingerprint ~= fp then return {'mismatch'} end
+if rec.lifecycle == 'completed' then return {'replay', rec.response} end
+if rec.lifecycle == 'submitting' then return {'awaiting', rec.execution_ref} end
+if now_ms < rec.lease_expires_at_ms then return {'in_flight'} end
+rec.owner = owner
+rec.lease_expires_at_ms = now_ms + lease_ms
+redis.call('SET', KEYS[1], cjson.encode(rec), 'PX', ttl_ms)
+return {'took_over'}
+"#;
+
+/// `ARGV` = owner, execution_ref, lease_ms, now_ms, ttl_ms.
+const MARK_SUBMITTING_LUA: &str = r#"
+local raw = redis.call('GET', KEYS[1])
+if not raw then return {'gone'} end
+local rec = cjson.decode(raw)
+if rec.owner ~= ARGV[1] then return {'conflict'} end
+rec.lifecycle = 'submitting'
+rec.execution_ref = ARGV[2]
+rec.lease_expires_at_ms = tonumber(ARGV[4]) + tonumber(ARGV[3])
+redis.call('SET', KEYS[1], cjson.encode(rec), 'PX', tonumber(ARGV[5]))
+return {'ok'}
+"#;
+
+/// `ARGV` = owner, response_json, execution_ref (or ""), ttl_ms.
+const COMPLETE_LUA: &str = r#"
+local raw = redis.call('GET', KEYS[1])
+if not raw then return {'gone'} end
+local rec = cjson.decode(raw)
+if rec.owner ~= ARGV[1] then return {'conflict'} end
+rec.lifecycle = 'completed'
+rec.response = ARGV[2]
+if ARGV[3] ~= '' then rec.execution_ref = ARGV[3] end
+redis.call('SET', KEYS[1], cjson.encode(rec), 'PX', tonumber(ARGV[4]))
+return {'ok'}
+"#;
+
+/// Durable [`ClaimStore`] backed by Redis. `ConnectionManager` reconnects
+/// transparently, so a Redis restart mid-operation surfaces as a retryable
+/// [`EngineError::Internal`] rather than a permanent failure.
+pub struct RedisClaimStore {
+    conn: ConnectionManager,
+    claim: redis::Script,
+    mark_submitting: redis::Script,
+    complete: redis::Script,
+}
+
+impl RedisClaimStore {
+    pub async fn new(redis_url: &str) -> Result<Self, EngineError> {
+        let client = redis::Client::open(redis_url)
+            .map_err(|e| EngineError::Internal(format!("redis client error: {e}")))?;
+        let conn = client
+            .get_connection_manager()
+            .await
+            .map_err(|e| EngineError::Internal(format!("redis connect error: {e}")))?;
+        Ok(Self {
+            conn,
+            claim: redis::Script::new(CLAIM_LUA),
+            mark_submitting: redis::Script::new(MARK_SUBMITTING_LUA),
+            complete: redis::Script::new(COMPLETE_LUA),
+        })
+    }
+
+    fn store_failure(op: &str, e: redis::RedisError) -> EngineError {
+        crate::observability::counter(metrics::STORE_FAILURES);
+        EngineError::Internal(format!("idempotency store {op} failed: {e}"))
+    }
+}
+
+#[async_trait]
+impl ClaimStore for RedisClaimStore {
+    async fn claim(
+        &self,
+        key: &str,
+        fingerprint: &str,
+        owner: &str,
+        lease: Duration,
+        ttl: Duration,
+    ) -> Result<ClaimOutcome, EngineError> {
+        let mut conn = self.conn.clone();
+        let parts: Vec<String> = self
+            .claim
+            .key(key)
+            .arg(fingerprint)
+            .arg(owner)
+            .arg(lease.as_millis() as i64)
+            .arg(ttl.as_millis().max(1) as i64)
+            .arg(now_millis())
+            .invoke_async(&mut conn)
+            .await
+            .map_err(|e| Self::store_failure("claim", e))?;
+
+        let token = || ClaimToken {
+            key: key.to_string(),
+            owner: owner.to_string(),
+        };
+        match parts.first().map(String::as_str) {
+            Some("claimed") => {
+                crate::observability::counter(metrics::CLAIMS);
+                Ok(ClaimOutcome::Claimed(token()))
+            }
+            Some("took_over") => {
+                crate::observability::counter(metrics::CLAIMS);
+                crate::observability::counter(metrics::STALE_LEASE_TAKEOVERS);
+                Ok(ClaimOutcome::TookOver(token()))
+            }
+            Some("in_flight") => Ok(ClaimOutcome::InFlight),
+            Some("mismatch") => {
+                crate::observability::counter(metrics::CONFLICTS);
+                Err(EngineError::Conflict(
+                    "idempotency key reused with a different request".into(),
+                ))
+            }
+            Some("awaiting") => {
+                crate::observability::counter(metrics::AWAITING_RESULT);
+                Ok(ClaimOutcome::AwaitingResult {
+                    execution_ref: parts.get(1).cloned().unwrap_or_default(),
+                })
+            }
+            Some("replay") => {
+                crate::observability::counter(metrics::REPLAYS);
+                let raw = parts.get(1).map(String::as_str).unwrap_or("null");
+                let response = serde_json::from_str(raw).map_err(|e| {
+                    EngineError::Internal(format!("stored idempotency response is corrupt: {e}"))
+                })?;
+                Ok(ClaimOutcome::Replay { response })
+            }
+            other => Err(EngineError::Internal(format!(
+                "unexpected idempotency claim result: {other:?}"
+            ))),
+        }
+    }
+
+    async fn mark_submitting(
+        &self,
+        token: &ClaimToken,
+        execution_ref: &str,
+        lease: Duration,
+        ttl: Duration,
+    ) -> Result<(), EngineError> {
+        let mut conn = self.conn.clone();
+        let parts: Vec<String> = self
+            .mark_submitting
+            .key(&token.key)
+            .arg(&token.owner)
+            .arg(execution_ref)
+            .arg(lease.as_millis() as i64)
+            .arg(now_millis())
+            .arg(ttl.as_millis().max(1) as i64)
+            .invoke_async(&mut conn)
+            .await
+            .map_err(|e| Self::store_failure("mark_submitting", e))?;
+        interpret_write(parts.first().map(String::as_str))
+    }
+
+    async fn complete(
+        &self,
+        token: &ClaimToken,
+        response: &Value,
+        execution_ref: Option<&str>,
+        ttl: Duration,
+    ) -> Result<(), EngineError> {
+        let mut conn = self.conn.clone();
+        let response_json = serde_json::to_string(response).map_err(|e| {
+            EngineError::Internal(format!("cannot serialize idempotency response: {e}"))
+        })?;
+        let parts: Vec<String> = self
+            .complete
+            .key(&token.key)
+            .arg(&token.owner)
+            .arg(response_json)
+            .arg(execution_ref.unwrap_or(""))
+            .arg(ttl.as_millis().max(1) as i64)
+            .invoke_async(&mut conn)
+            .await
+            .map_err(|e| Self::store_failure("complete", e))?;
+        interpret_write(parts.first().map(String::as_str))
+    }
+
+    async fn ready(&self) -> bool {
+        let mut conn = self.conn.clone();
+        redis::cmd("PING")
+            .query_async::<String>(&mut conn)
+            .await
+            .is_ok()
+    }
+}
+
+fn interpret_write(tag: Option<&str>) -> Result<(), EngineError> {
+    match tag {
+        Some("ok") => Ok(()),
+        Some("conflict") => {
+            crate::observability::counter(metrics::CONFLICTS);
+            Err(EngineError::Conflict("idempotency claim taken over".into()))
+        }
+        Some("gone") => Err(EngineError::PreconditionFailed(
+            "idempotency claim expired before it could be committed".into(),
+        )),
+        other => Err(EngineError::Internal(format!(
+            "unexpected idempotency write result: {other:?}"
+        ))),
+    }
+}
