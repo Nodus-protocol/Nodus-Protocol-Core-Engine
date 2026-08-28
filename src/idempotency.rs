@@ -517,3 +517,236 @@ mod tests {
         assert_eq!(store.get("k").await.unwrap().unwrap(), json!("v2"));
     }
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// In-memory atomic store — development and tests only. Never durable across a
+// restart, so the factory refuses to hand one out on mainnet.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// In-process [`ClaimStore`]. Atomicity comes from `DashMap`'s per-shard entry
+/// lock: the read-decide-write in `claim` runs while the shard is held, so two
+/// concurrent claims of the same key are serialized.
+#[derive(Default)]
+pub struct MemoryClaimStore {
+    records: DashMap<String, ClaimRecord>,
+}
+
+impl MemoryClaimStore {
+    pub fn new() -> Self {
+        Self {
+            records: DashMap::new(),
+        }
+    }
+
+    /// Drop records whose TTL (approximated by the lease window plus grace)
+    /// has elapsed. Callers run this on a timer; correctness does not depend
+    /// on it because every decision re-checks expiry inline.
+    pub fn evict_expired(&self) {
+        let now = now_millis();
+        self.records
+            .retain(|_, rec| now < rec.lease_expires_at_ms || matches!(rec.lifecycle, ClaimLifecycle::Completed { .. }));
+    }
+
+    #[cfg(test)]
+    pub(crate) fn peek(&self, key: &str) -> Option<ClaimRecord> {
+        self.records.get(key).map(|r| r.value().clone())
+    }
+}
+
+#[async_trait]
+impl ClaimStore for MemoryClaimStore {
+    async fn claim(
+        &self,
+        key: &str,
+        fingerprint: &str,
+        owner: &str,
+        lease: Duration,
+        _ttl: Duration,
+    ) -> Result<ClaimOutcome, EngineError> {
+        use dashmap::mapref::entry::Entry;
+        let now = now_millis();
+        match self.records.entry(key.to_string()) {
+            Entry::Vacant(slot) => {
+                slot.insert(ClaimRecord::new_in_flight(fingerprint, owner, lease));
+                Ok(ClaimOutcome::Claimed(ClaimToken {
+                    key: key.to_string(),
+                    owner: owner.to_string(),
+                }))
+            }
+            Entry::Occupied(mut slot) => {
+                let rec = slot.get_mut();
+                if rec.fingerprint != fingerprint {
+                    return Err(EngineError::Conflict(
+                        "idempotency key reused with a different request".into(),
+                    ));
+                }
+                match &rec.lifecycle {
+                    ClaimLifecycle::Completed { response, .. } => Ok(ClaimOutcome::Replay {
+                        response: response.clone(),
+                    }),
+                    ClaimLifecycle::Submitting { execution_ref } => Ok(ClaimOutcome::AwaitingResult {
+                        execution_ref: execution_ref.clone(),
+                    }),
+                    ClaimLifecycle::InFlight => {
+                        if !rec.lease_expired(now) {
+                            return Ok(ClaimOutcome::InFlight);
+                        }
+                        // Abandoned lease with no side effect — safe takeover.
+                        rec.owner = owner.to_string();
+                        rec.lease_expires_at_ms = now + lease.as_millis() as i64;
+                        Ok(ClaimOutcome::TookOver(ClaimToken {
+                            key: key.to_string(),
+                            owner: owner.to_string(),
+                        }))
+                    }
+                }
+            }
+        }
+    }
+
+    async fn mark_submitting(
+        &self,
+        token: &ClaimToken,
+        execution_ref: &str,
+        lease: Duration,
+        _ttl: Duration,
+    ) -> Result<(), EngineError> {
+        let mut rec = self
+            .records
+            .get_mut(&token.key)
+            .ok_or_else(|| EngineError::PreconditionFailed("idempotency claim expired".into()))?;
+        if rec.owner != token.owner {
+            return Err(EngineError::Conflict("idempotency claim taken over".into()));
+        }
+        rec.lifecycle = ClaimLifecycle::Submitting {
+            execution_ref: execution_ref.to_string(),
+        };
+        rec.lease_expires_at_ms = now_millis() + lease.as_millis() as i64;
+        Ok(())
+    }
+
+    async fn complete(
+        &self,
+        token: &ClaimToken,
+        response: &Value,
+        execution_ref: Option<&str>,
+        _ttl: Duration,
+    ) -> Result<(), EngineError> {
+        let mut rec = self
+            .records
+            .get_mut(&token.key)
+            .ok_or_else(|| EngineError::PreconditionFailed("idempotency claim expired".into()))?;
+        if rec.owner != token.owner {
+            return Err(EngineError::Conflict("idempotency claim taken over".into()));
+        }
+        rec.lifecycle = ClaimLifecycle::Completed {
+            response: response.clone(),
+            execution_ref: execution_ref.map(str::to_string),
+        };
+        Ok(())
+    }
+
+    async fn ready(&self) -> bool {
+        // An in-memory store is reachable but not durable. Readiness treats it
+        // as not-ready so a misconfigured deployment surfaces on /readyz.
+        false
+    }
+}
+
+#[cfg(test)]
+mod memory_claim_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn store() -> MemoryClaimStore {
+        MemoryClaimStore::new()
+    }
+
+    const LEASE: Duration = Duration::from_secs(30);
+    const TTL: Duration = Duration::from_secs(86_400);
+
+    #[tokio::test]
+    async fn first_claim_is_granted_second_is_in_flight() {
+        let s = store();
+        let a = s.claim("k", "fp", "owner-a", LEASE, TTL).await.unwrap();
+        assert!(matches!(a, ClaimOutcome::Claimed(_)));
+        let b = s.claim("k", "fp", "owner-b", LEASE, TTL).await.unwrap();
+        assert!(matches!(b, ClaimOutcome::InFlight));
+    }
+
+    #[tokio::test]
+    async fn mismatched_fingerprint_is_rejected() {
+        let s = store();
+        s.claim("k", "fp-1", "o", LEASE, TTL).await.unwrap();
+        let err = s.claim("k", "fp-2", "o", LEASE, TTL).await.unwrap_err();
+        assert_eq!(err.http_status(), 409);
+    }
+
+    #[tokio::test]
+    async fn completed_claim_replays_the_response() {
+        let s = store();
+        let token = match s.claim("k", "fp", "o", LEASE, TTL).await.unwrap() {
+            ClaimOutcome::Claimed(t) => t,
+            other => panic!("expected Claimed, got {other:?}"),
+        };
+        s.complete(&token, &json!({"id": "p-1"}), Some("tx-1"), TTL)
+            .await
+            .unwrap();
+        match s.claim("k", "fp", "o2", LEASE, TTL).await.unwrap() {
+            ClaimOutcome::Replay { response } => assert_eq!(response, json!({"id": "p-1"})),
+            other => panic!("expected Replay, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn expired_in_flight_lease_can_be_taken_over() {
+        let s = store();
+        s.claim("k", "fp", "dead-owner", Duration::from_millis(0), TTL)
+            .await
+            .unwrap();
+        match s.claim("k", "fp", "new-owner", LEASE, TTL).await.unwrap() {
+            ClaimOutcome::TookOver(t) => assert_eq!(t.owner, "new-owner"),
+            other => panic!("expected TookOver, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_submitting_claim_is_never_taken_over_even_with_expired_lease() {
+        let s = store();
+        let token = match s
+            .claim("k", "fp", "o", Duration::from_millis(0), TTL)
+            .await
+            .unwrap()
+        {
+            ClaimOutcome::Claimed(t) => t,
+            other => panic!("expected Claimed, got {other:?}"),
+        };
+        s.mark_submitting(&token, "exec-ref-1", Duration::from_millis(0), TTL)
+            .await
+            .unwrap();
+        match s.claim("k", "fp", "successor", LEASE, TTL).await.unwrap() {
+            ClaimOutcome::AwaitingResult { execution_ref } => assert_eq!(execution_ref, "exec-ref-1"),
+            other => panic!("expected AwaitingResult, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn complete_after_takeover_is_rejected_for_the_stale_owner() {
+        let s = store();
+        let stale = match s
+            .claim("k", "fp", "o1", Duration::from_millis(0), TTL)
+            .await
+            .unwrap()
+        {
+            ClaimOutcome::Claimed(t) => t,
+            other => panic!("expected Claimed, got {other:?}"),
+        };
+        // A successor takes over the abandoned lease.
+        s.claim("k", "fp", "o2", LEASE, TTL).await.unwrap();
+        let err = s
+            .complete(&stale, &json!({}), None, TTL)
+            .await
+            .unwrap_err();
+        assert_eq!(err.http_status(), 409);
+    }
+}
