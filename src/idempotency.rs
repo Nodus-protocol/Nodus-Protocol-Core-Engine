@@ -325,6 +325,29 @@ pub trait ClaimStore: Send + Sync {
     async fn ready(&self) -> bool;
 }
 
+/// Counter names for the idempotency layer.
+///
+/// Every metric is a plain counter with no dynamic labels, so a request
+/// payload, idempotency key, or fingerprint can never leak into telemetry —
+/// the type of [`crate::observability::counter`] (`&'static str`) makes that
+/// a compile-time guarantee.
+pub mod metrics {
+    /// A new claim (fresh or via takeover of an abandoned lease) was granted.
+    pub const CLAIMS: &str = "nodus_idempotency_claims_total";
+    /// A completed response was replayed to a later identical request.
+    pub const REPLAYS: &str = "nodus_idempotency_replays_total";
+    /// A key was presented with a fingerprint that did not match the stored
+    /// claim, or a write lost its owner to a takeover.
+    pub const CONFLICTS: &str = "nodus_idempotency_conflicts_total";
+    /// An abandoned in-flight lease was taken over by a new owner.
+    pub const STALE_LEASE_TAKEOVERS: &str = "nodus_idempotency_stale_lease_takeovers_total";
+    /// A backing-store operation failed.
+    pub const STORE_FAILURES: &str = "nodus_idempotency_store_failures_total";
+    /// A request hit a claim that had submitted but not recorded a result;
+    /// the outcome is unknown and must be reconciled out of band.
+    pub const AWAITING_RESULT: &str = "nodus_idempotency_awaiting_result_total";
+}
+
 #[async_trait]
 pub trait IdempotencyStore: Send + Sync {
     async fn get(&self, key: &str) -> Result<Option<Value>, EngineError>;
@@ -568,6 +591,7 @@ impl ClaimStore for MemoryClaimStore {
         match self.records.entry(key.to_string()) {
             Entry::Vacant(slot) => {
                 slot.insert(ClaimRecord::new_in_flight(fingerprint, owner, lease));
+                crate::observability::counter(metrics::CLAIMS);
                 Ok(ClaimOutcome::Claimed(ClaimToken {
                     key: key.to_string(),
                     owner: owner.to_string(),
@@ -576,17 +600,24 @@ impl ClaimStore for MemoryClaimStore {
             Entry::Occupied(mut slot) => {
                 let rec = slot.get_mut();
                 if rec.fingerprint != fingerprint {
+                    crate::observability::counter(metrics::CONFLICTS);
                     return Err(EngineError::Conflict(
                         "idempotency key reused with a different request".into(),
                     ));
                 }
                 match &rec.lifecycle {
-                    ClaimLifecycle::Completed { response, .. } => Ok(ClaimOutcome::Replay {
-                        response: response.clone(),
-                    }),
-                    ClaimLifecycle::Submitting { execution_ref } => Ok(ClaimOutcome::AwaitingResult {
-                        execution_ref: execution_ref.clone(),
-                    }),
+                    ClaimLifecycle::Completed { response, .. } => {
+                        crate::observability::counter(metrics::REPLAYS);
+                        Ok(ClaimOutcome::Replay {
+                            response: response.clone(),
+                        })
+                    }
+                    ClaimLifecycle::Submitting { execution_ref } => {
+                        crate::observability::counter(metrics::AWAITING_RESULT);
+                        Ok(ClaimOutcome::AwaitingResult {
+                            execution_ref: execution_ref.clone(),
+                        })
+                    }
                     ClaimLifecycle::InFlight => {
                         if !rec.lease_expired(now) {
                             return Ok(ClaimOutcome::InFlight);
@@ -594,6 +625,8 @@ impl ClaimStore for MemoryClaimStore {
                         // Abandoned lease with no side effect — safe takeover.
                         rec.owner = owner.to_string();
                         rec.lease_expires_at_ms = now + lease.as_millis() as i64;
+                        crate::observability::counter(metrics::CLAIMS);
+                        crate::observability::counter(metrics::STALE_LEASE_TAKEOVERS);
                         Ok(ClaimOutcome::TookOver(ClaimToken {
                             key: key.to_string(),
                             owner: owner.to_string(),
@@ -616,6 +649,7 @@ impl ClaimStore for MemoryClaimStore {
             .get_mut(&token.key)
             .ok_or_else(|| EngineError::PreconditionFailed("idempotency claim expired".into()))?;
         if rec.owner != token.owner {
+            crate::observability::counter(metrics::CONFLICTS);
             return Err(EngineError::Conflict("idempotency claim taken over".into()));
         }
         rec.lifecycle = ClaimLifecycle::Submitting {
@@ -637,6 +671,7 @@ impl ClaimStore for MemoryClaimStore {
             .get_mut(&token.key)
             .ok_or_else(|| EngineError::PreconditionFailed("idempotency claim expired".into()))?;
         if rec.owner != token.owner {
+            crate::observability::counter(metrics::CONFLICTS);
             return Err(EngineError::Conflict("idempotency claim taken over".into()));
         }
         rec.lifecycle = ClaimLifecycle::Completed {
