@@ -138,6 +138,106 @@ mod namespace_tests {
     }
 }
 
+/// Current Unix time in milliseconds. Milliseconds (not seconds) so a lease
+/// can be sub-second and takeover decisions stay precise under load.
+pub(crate) fn now_millis() -> i64 {
+    chrono::Utc::now().timestamp_millis()
+}
+
+/// Lifecycle of a claimed idempotency key.
+///
+/// The distinction between [`InFlight`](ClaimLifecycle::InFlight) and
+/// [`Submitting`](ClaimLifecycle::Submitting) is what makes takeover safe: an
+/// `InFlight` claim has performed no irreversible side effect and can be
+/// re-executed from scratch, whereas a `Submitting` claim has (or is about
+/// to have) an external transaction in flight whose outcome must be
+/// reconciled — never re-submitted.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "lifecycle", rename_all = "snake_case")]
+pub enum ClaimLifecycle {
+    /// Owner is executing; no side effect has occurred yet.
+    InFlight,
+    /// Owner recorded an execution reference before submitting. On takeover
+    /// the successor must reconcile `execution_ref`, not re-run the work.
+    Submitting { execution_ref: String },
+    /// A final response has been committed and is replayed verbatim to every
+    /// later request that presents the same key and fingerprint.
+    Completed {
+        response: Value,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        execution_ref: Option<String>,
+    },
+}
+
+/// Durable record backing one idempotency key.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ClaimRecord {
+    /// Canonical SHA-256 of the request body (see [`request_fingerprint`]).
+    pub fingerprint: String,
+    /// Opaque identity of the current owner. Used for compare-and-set when
+    /// advancing the lifecycle and to detect a foreign takeover.
+    pub owner: String,
+    /// Unix-millis after which the lease is abandoned and another worker may
+    /// take over an `InFlight` claim.
+    pub lease_expires_at_ms: i64,
+    /// Unix-millis the key was first claimed.
+    pub created_at_ms: i64,
+    #[serde(flatten)]
+    pub lifecycle: ClaimLifecycle,
+}
+
+impl ClaimRecord {
+    pub(crate) fn new_in_flight(fingerprint: &str, owner: &str, lease: Duration) -> Self {
+        let now = now_millis();
+        Self {
+            fingerprint: fingerprint.to_string(),
+            owner: owner.to_string(),
+            lease_expires_at_ms: now + lease.as_millis() as i64,
+            created_at_ms: now,
+            lifecycle: ClaimLifecycle::InFlight,
+        }
+    }
+
+    pub(crate) fn lease_expired(&self, now_ms: i64) -> bool {
+        now_ms >= self.lease_expires_at_ms
+    }
+}
+
+#[cfg(test)]
+mod record_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn in_flight_record_round_trips_through_json() {
+        let rec = ClaimRecord::new_in_flight("fp", "owner-1", Duration::from_secs(30));
+        let raw = serde_json::to_string(&rec).unwrap();
+        assert!(raw.contains("\"lifecycle\":\"in_flight\""));
+        let back: ClaimRecord = serde_json::from_str(&raw).unwrap();
+        assert_eq!(back.owner, "owner-1");
+        assert_eq!(back.lifecycle, ClaimLifecycle::InFlight);
+    }
+
+    #[test]
+    fn completed_record_round_trips_with_response() {
+        let mut rec = ClaimRecord::new_in_flight("fp", "o", Duration::from_secs(1));
+        rec.lifecycle = ClaimLifecycle::Completed {
+            response: json!({"id": "p-1"}),
+            execution_ref: Some("tx-abc".into()),
+        };
+        let raw = serde_json::to_string(&rec).unwrap();
+        let back: ClaimRecord = serde_json::from_str(&raw).unwrap();
+        assert_eq!(back.lifecycle, rec.lifecycle);
+    }
+
+    #[test]
+    fn lease_expiry_is_inclusive_of_the_deadline() {
+        let rec = ClaimRecord::new_in_flight("fp", "o", Duration::from_secs(0));
+        assert!(rec.lease_expired(rec.lease_expires_at_ms));
+        assert!(!rec.lease_expired(rec.lease_expires_at_ms - 1));
+    }
+}
+
 #[async_trait]
 pub trait IdempotencyStore: Send + Sync {
     async fn get(&self, key: &str) -> Result<Option<Value>, EngineError>;
