@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::env;
 
 use crate::auth::{parse_service_keys, ServiceKey};
+use crate::utils::{AssetId, AssetType};
 
 #[derive(Clone)]
 pub struct Config {
@@ -91,8 +92,12 @@ impl Network {
 pub struct PoolConfig {
     pub soroban_rpc_url: String,
     pub contract_id: String,
-    pub token_0: String,
-    pub token_1: String,
+    /// Canonical identity of the first pool token (token-0 in contract ordering).
+    /// Loaded from `POOL_TOKEN_0_JSON` (a JSON-serialised [`AssetId`]).
+    pub token_0: AssetId,
+    /// Canonical identity of the second pool token (token-1 in contract ordering).
+    /// Loaded from `POOL_TOKEN_1_JSON` (a JSON-serialised [`AssetId`]).
+    pub token_1: AssetId,
     /// Classic (non-resource) base fee, in stroops, before Soroban RPC's
     /// simulated resource fee is added on top.
     pub base_fee_stroops: u32,
@@ -100,6 +105,56 @@ pub struct PoolConfig {
     /// stroops. Transaction preparation refuses to hand back a transaction
     /// priced above this, regardless of what simulation says it costs.
     pub fee_ceiling_stroops: u32,
+}
+
+/// Parse an [`AssetId`] from the value of an environment variable.
+///
+/// Accepts two formats:
+/// 1. **JSON** — a full [`AssetId`] object:
+///    ```text
+///    POOL_TOKEN_0_JSON='{"network":"mainnet","asset_type":"native","symbol":"XLM","decimals":7}'
+///    ```
+/// 2. **Legacy shorthand** (testnet / dev only) — a bare symbol string such
+///    as `"XLM"` or `"USDC"`.  Treated as a native XLM asset or a generic
+///    testnet issued asset respectively.  **Not for production use.**
+///
+/// Panics at startup if the value is present but unparseable, so
+/// misconfigurations surface immediately rather than at runtime.
+pub fn parse_asset_id(env_var: &str, network: Network) -> Option<AssetId> {
+    let raw = env::var(env_var).ok()?;
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    // Try full JSON first.
+    if trimmed.starts_with('{') {
+        return Some(serde_json::from_str(trimmed).unwrap_or_else(|e| {
+            panic!("env var {env_var} contains invalid AssetId JSON: {e}\nvalue: {trimmed}");
+        }));
+    }
+
+    // Legacy bare-symbol fallback (development / testnet only).
+    let net = match network {
+        Network::Mainnet => "mainnet",
+        Network::Testnet => "testnet",
+    };
+    tracing::warn!(
+        env_var,
+        symbol = trimmed,
+        "using legacy bare-symbol asset config — set {env_var} to a JSON AssetId for production"
+    );
+    Some(match trimmed {
+        "XLM" | "xlm" => AssetId::native(net),
+        sym => AssetId {
+            network: net.to_string(),
+            asset_type: AssetType::IssuedAsset,
+            symbol: sym.to_string(),
+            decimals: 7,
+            issuer: None,   // unknown — not safe for mainnet
+            contract: None,
+        },
+    })
 }
 
 impl Config {
@@ -117,8 +172,12 @@ impl Config {
         let pool = {
             let rpc = env::var("SOROBAN_RPC_URL").ok();
             let contract = env::var("POOL_CONTRACT_ID").ok();
-            let t0 = env::var("POOL_TOKEN_0").ok();
-            let t1 = env::var("POOL_TOKEN_1").ok();
+            // Prefer JSON env vars; fall back to legacy bare-symbol vars for
+            // backward compatibility in local/testnet setups.
+            let t0 = parse_asset_id("POOL_TOKEN_0_JSON", network)
+                .or_else(|| parse_asset_id("POOL_TOKEN_0", network));
+            let t1 = parse_asset_id("POOL_TOKEN_1_JSON", network)
+                .or_else(|| parse_asset_id("POOL_TOKEN_1", network));
 
             match (rpc, contract, t0, t1) {
                 (Some(rpc), Some(contract), Some(t0), Some(t1)) => Some(PoolConfig {
