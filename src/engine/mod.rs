@@ -7,7 +7,7 @@ use crate::idempotency::IdempotencyStore;
 use crate::retry::{retry, RetryConfig};
 use crate::router::Router;
 use crate::store::PaymentStore;
-use crate::utils::{now_utc, EngineError, Payment, PaymentStatus, Urgency};
+use crate::utils::{now_utc, AssetId, EngineError, Payment, PaymentStatus, Urgency};
 use crate::validation;
 
 pub struct Engine {
@@ -40,13 +40,13 @@ impl Engine {
         sender: String,
         recipient: String,
         amount: u64,
-        token: String,
+        asset: AssetId,
         urgency: Urgency,
     ) -> Result<Payment, EngineError> {
         validation::stellar_address(&sender)?;
         validation::stellar_address(&recipient)?;
         validation::amount(amount)?;
-        validation::token(&token)?;
+        validation::asset_id(&asset)?;
 
         let route = match self.router.select(&urgency).await {
             Ok(r) => r,
@@ -57,7 +57,7 @@ impl Engine {
                     sender,
                     recipient,
                     amount,
-                    token,
+                    asset,
                     status: PaymentStatus::Failed,
                     tx_hash: None,
                     fee_stroops: 0,
@@ -77,7 +77,7 @@ impl Engine {
             sender,
             recipient,
             amount,
-            token,
+            asset,
             status: PaymentStatus::Pending,
             tx_hash: None,
             fee_stroops: route.fee_stroops,
@@ -135,10 +135,11 @@ impl Engine {
         sender: String,
         recipient: String,
         amount: u64,
-        token: String,
+        asset: AssetId,
         urgency: Urgency,
     ) -> Result<SimulationResult, EngineError> {
         validation::amount(amount)?;
+        validation::asset_id(&asset)?;
         let route = self.router.select(&urgency).await?;
 
         crate::observability::gauge(
@@ -149,7 +150,7 @@ impl Engine {
             sender,
             recipient,
             amount,
-            token,
+            asset,
             fee_stroops: route.fee_stroops,
             chain: route.adapter.name().to_string(),
             estimated_confirmation_seconds: route.estimated_seconds,
@@ -183,7 +184,8 @@ pub struct SimulationResult {
     pub sender: String,
     pub recipient: String,
     pub amount: u64,
-    pub token: String,
+    /// Full canonical asset identity.
+    pub asset: AssetId,
     pub fee_stroops: u64,
     pub chain: String,
     pub estimated_confirmation_seconds: u32,
