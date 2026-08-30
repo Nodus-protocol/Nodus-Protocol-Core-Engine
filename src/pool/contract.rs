@@ -1,4 +1,3 @@
-use base64::{engine::general_purpose::STANDARD as B64, Engine};
 use serde::Serialize;
 use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
@@ -161,12 +160,42 @@ impl ContractClient {
     /// own instance storage; the deployed contract stores LP balances on a
     /// separate LP token contract, so this always returns 0.
     pub async fn lp_balance(&self, address: &str) -> Result<u128, EngineError> {
-        let key_xdr = self.lp_balance_key_xdr(address)?;
+        let lp_token = self.lp_token_address().await?;
+        let key = xdr::sepal41_balance_key(address)?;
+        let key_xdr = xdr::contract_persistent_ledger_key(&lp_token, key)?;
         let entries = self.rpc.get_ledger_entries(vec![key_xdr]).await?;
-        if entries.is_empty() {
-            return Ok(0);
-        }
-        parse_i128_from_xdr(&entries[0].xdr)
+        let entry = match entries.first() {
+            Some(entry) => entry,
+            // No entry means the holder has never received LP tokens (0).
+            None => return Ok(0),
+        };
+        let val = xdr::decode_contract_data_val(&entry.xdr)?;
+        i128_to_u128(xdr::scval_to_i128(&val)?).ok_or_else(|| {
+            EngineError::Internal("LP token balance is negative or overflowed u128".into())
+        })
+    }
+
+    /// Resolves the pool's own tracked LP token contract address
+    /// (`DataKey::LpToken`) from the pool's typed instance storage.
+    async fn lp_token_address(&self) -> Result<String, EngineError> {
+        let map = self.fetch_pool_instance_map().await?;
+        let lp_token_addr = xdr::instance_address(&map, "LpToken")?;
+        Ok(xdr::address_to_string(&lp_token_addr))
+    }
+
+    /// Reads the `TotalSupply` instance value from a specific LP token
+    /// contract.
+    async fn read_lp_total_supply(&self, lp_token: &str) -> Result<u128, EngineError> {
+        let key_xdr = xdr::contract_instance_ledger_key(lp_token)?;
+        let entries = self.rpc.get_ledger_entries(vec![key_xdr]).await?;
+        let entry = entries.first().ok_or_else(|| {
+            EngineError::NotFound(format!("LP token contract {lp_token} instance not found"))
+        })?;
+        let map = xdr::decode_instance_storage(&entry.xdr)?;
+        let supply = xdr::instance_i128(&map, "TotalSupply")?;
+        i128_to_u128(supply).ok_or_else(|| {
+            EngineError::Internal("LP token total supply is negative or overflowed u128".into())
+        })
     }
 
     pub async fn prepare_swap(
@@ -278,6 +307,40 @@ impl ContractClient {
     }
 
     async fn fetch_reserves(&self) -> Result<PoolReserves, EngineError> {
+        let map = self.fetch_pool_instance_map().await?;
+
+        let reserve_0 = xdr::instance_i128(&map, "Reserve0").and_then(|v| {
+            i128_to_u128(v).ok_or_else(|| {
+                EngineError::Internal("Reserve0 is negative or overflowed u128".into())
+            })
+        })?;
+        let reserve_1 = xdr::instance_i128(&map, "Reserve1").and_then(|v| {
+            i128_to_u128(v).ok_or_else(|| {
+                EngineError::Internal("Reserve1 is negative or overflowed u128".into())
+            })
+        })?;
+        let timestamp_last = xdr::instance_u64(&map, "TimestampLast")?;
+
+        // LP total supply is not part of the pool's own storage: it lives on
+        // the SEP-41 LP token contract (see the pool's DataKey::LpToken). Read
+        // it from the actual LP token contract instance rather than scanning
+        // the pool for an "LpTotalSup" fragment that does not exist.
+        let lp_token = xdr::address_to_string(&xdr::instance_address(&map, "LpToken")?);
+        let lp_total_supply = self.read_lp_total_supply(&lp_token).await?;
+
+        Ok(PoolReserves {
+            reserve_0,
+            reserve_1,
+            token_0: self.pool.token_0.clone(),
+            token_1: self.pool.token_1.clone(),
+            lp_total_supply,
+            timestamp_last,
+        })
+    }
+
+    /// Reads and decodes the pool contract's typed instance storage map
+    /// exactly once per call, emitting the source-ledger gauge.
+    async fn fetch_pool_instance_map(&self) -> Result<xdr::ScMap, EngineError> {
         let key = xdr::contract_instance_ledger_key(self.contract_id())?;
         let entries = self.rpc.get_ledger_entries(vec![key]).await?;
         if entries.is_empty() {

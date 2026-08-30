@@ -56,13 +56,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The pool contract's instance-storage ledger key (used by `/pool/reserves`
   and friends) is now built with typed XDR instead of a hand-rolled byte
   buffer.
-
-### Known limitations
-- `/pool/lp-balance` and the `lp_total_supply` field on `/pool/reserves`
-  still read a key that no longer exists on the pool contract's own
-  storage — LP balances and total supply now live on a separate SEP-41 LP
-  token contract per the deployed contract's source. Pre-existing behavior,
-  left as-is and out of scope for this change; see `ContractClient::lp_balance`.
+- **Pool-state reads decoded through official `stellar-xdr` types.** All
+  remaining structural byte scanning is gone from production XDR paths:
+  `/pool/reserves` decodes the pool contract's typed instance storage
+  (`Reserve0`, `Reserve1`, `TimestampLast`, `LpToken`) via real
+  `ScVal`/`ScMap` types instead of scanning raw bytes for `Reserve0` /
+  `Reserve1` / `LpTotalSup` / `TimestampL` fragments; missing or
+  type-mismatched fields are now errors rather than silently-guessed zeros.
+- **LP balances and total supply now query the actual SEP-41 LP token
+  contract** resolved from the pool's `DataKey::LpToken`, instead of
+  reading an `"LpBalance"`-on-pool key that does not exist (which previously
+  always returned `0`). `/pool/lp-balance` and `lp_total_supply` on
+  `/pool/reserves` are functional.
+- **LP-token keys are grouped through typed XDR** (`sepal41_balance_key` /
+  `contract_persistent_ledger_key`) instead of the hand-assembled
+  byte-offset + padding buffer previously used to build them.
+- **Removed the hex/base64 contract-id fallback** (`parse_contract_id`);
+  addresses and contract ids now go through full `stellar_strkey` checksum
+  and type validation (`xdr::parse_address`), satisfying the criteria that
+  contract ids and account addresses use full StrKey validation.
+- Golden + mutation tests (`tests/pool_decode_test.rs`) prove malformed,
+  truncated, wrong-type, and missing-key XDR fails safely, and that real
+  ledger entries round-trip with correct typed values.
 
 ### Security
 - **Breaking:** the engine no longer serves privileged endpoints to
