@@ -8,10 +8,7 @@ use axum::{
 use serde::{Deserialize, Serialize};
 
 use crate::api::AppState;
-use crate::config::Network;
-use crate::engine::{IdempotentInitiation, IdempotentRequest};
-use crate::idempotency::IdempotencyNamespace;
-use crate::utils::{ApiError, EngineError, Urgency};
+use crate::utils::{ApiError, AssetId, EngineError, Urgency};
 
 impl IntoResponse for EngineError {
     fn into_response(self) -> Response {
@@ -46,8 +43,10 @@ impl IntoResponse for EngineError {
 pub struct InitiateRequest {
     pub sender: String,
     pub recipient: String,
+    /// Amount in integer base units of `asset`.
     pub amount: u64,
-    pub token: String,
+    /// Canonical asset identity. Replaces the old bare `token` string.
+    pub asset: AssetId,
     #[serde(default)]
     pub urgency: Urgency,
     pub idempotency_key: Option<String>,
@@ -81,17 +80,13 @@ pub async fn initiate(
 
     let outcome = ctx
         .engine
-        .initiate_idempotent(IdempotentRequest {
-            namespace: &namespace,
-            client_key: &client_key,
-            request_body: &request_body,
-            ttl: Duration::from_secs(ctx.config.idempotency_ttl_secs),
-            sender: req.sender,
-            recipient: req.recipient,
-            amount: req.amount,
-            token: req.token,
-            urgency: req.urgency,
-        })
+        .initiate(
+            req.sender,
+            req.recipient,
+            req.amount,
+            req.asset,
+            req.urgency,
+        )
         .await?;
 
     Ok(match outcome {
@@ -120,7 +115,7 @@ pub struct SimulateRequest {
     pub sender: String,
     pub recipient: String,
     pub amount: u64,
-    pub token: String,
+    pub asset: AssetId,
     #[serde(default)]
     pub urgency: Urgency,
 }
@@ -131,13 +126,7 @@ pub async fn simulate(
 ) -> Result<impl IntoResponse, EngineError> {
     let result = ctx
         .engine
-        .simulate(
-            req.sender,
-            req.recipient,
-            req.amount,
-            req.token,
-            req.urgency,
-        )
+        .simulate(req.sender, req.recipient, req.amount, req.asset, req.urgency)
         .await?;
     Ok(Json(result))
 }
@@ -149,7 +138,8 @@ pub struct Receipt {
     pub sender: String,
     pub recipient: String,
     pub amount: u64,
-    pub token: String,
+    /// Full canonical asset identity.
+    pub asset: AssetId,
     pub chain: String,
     pub confirmed_at: String,
 }
@@ -168,7 +158,7 @@ pub async fn receipt(
         sender: payment.sender,
         recipient: payment.recipient,
         amount: payment.amount,
-        token: payment.token,
+        asset: payment.asset,
         chain: "stellar".into(),
         confirmed_at: payment.updated_at,
     }))
