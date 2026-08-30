@@ -293,6 +293,12 @@ impl Config {
                     "refusing to start: NETWORK=mainnet requires at least one key in ENGINE_AUTH_KEYS"
                 );
             }
+            if self.redis_url.is_none() {
+                panic!(
+                    "refusing to start: NETWORK=mainnet requires REDIS_URL for the durable \
+                     idempotency store (no in-memory fallback is permitted)"
+                );
+            }
         }
         if !self.auth_disabled && self.auth_keys.is_empty() {
             tracing::warn!("ENGINE_AUTH_KEYS is empty — every non-health request will be rejected");
@@ -418,6 +424,39 @@ mod tests {
     fn validate_passes_on_testnet_with_defaults() {
         let mut config = base_config();
         config.network = Network::Testnet;
+        config.validate();
+    }
+
+    #[test]
+    fn validate_panics_on_mainnet_without_redis() {
+        let mut config = base_config();
+        config.auth_disabled = false;
+        config.auth_keys.insert(
+            "k".into(),
+            crate::auth::parse_service_keys("k:00112233445566778899aabbccddeeff:read")
+                .unwrap()
+                .remove("k")
+                .unwrap(),
+        );
+        config.allow_insecure_transport = true;
+        config.redis_url = None;
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| config.validate()));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn validate_passes_on_mainnet_with_redis_auth_and_tls() {
+        let mut config = base_config();
+        config.auth_disabled = false;
+        config.auth_keys.insert(
+            "k".into(),
+            crate::auth::parse_service_keys("k:00112233445566778899aabbccddeeff:read")
+                .unwrap()
+                .remove("k")
+                .unwrap(),
+        );
+        config.allow_insecure_transport = true;
+        config.redis_url = Some("redis://localhost:6379".into());
         config.validate();
     }
 }
