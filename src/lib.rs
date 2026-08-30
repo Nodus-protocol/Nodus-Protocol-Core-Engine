@@ -19,4 +19,4 @@ pub mod utils;
 pub mod validation;
 pub mod webhook;
 
-pub use idempotency::{IdempotencyStore, MemoryIdempotencyStore};
+pub use idempotency::{ClaimStore, MemoryClaimStore, RedisClaimStore};

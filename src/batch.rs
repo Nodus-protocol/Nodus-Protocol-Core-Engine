@@ -3,7 +3,7 @@ use std::sync::Arc;
 use tokio::task::JoinSet;
 
 use crate::engine::Engine;
-use crate::utils::{EngineError, Payment, Urgency};
+use crate::utils::{AssetId, EngineError, Payment, Urgency};
 
 const MAX_BATCH: usize = 100;
 
@@ -12,7 +12,7 @@ pub struct BatchItem {
     pub sender: String,
     pub recipient: String,
     pub amount: u64,
-    pub token: String,
+    pub asset: AssetId,
     #[serde(default)]
     pub urgency: Urgency,
 }
@@ -59,7 +59,7 @@ pub async fn process_batch(
                     item.sender,
                     item.recipient,
                     item.amount,
-                    item.token,
+                    item.asset,
                     item.urgency,
                 )
                 .await

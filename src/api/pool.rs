@@ -12,24 +12,26 @@ use crate::api::AppContext;
 use crate::config::Network;
 use crate::pool::math;
 use crate::pool::prepare::PrepareParams;
-use crate::utils::EngineError;
+use crate::utils::{AssetId, EngineError, RationalPrice};
 
 type AppState = Arc<AppContext>;
 
 // ── Query types ───────────────────────────────────────────────────────────────
 
+/// Quote request. `token_in` is a JSON-encoded [`AssetId`] passed as a
+/// query-string parameter (URL-encoded). Bare symbol strings are rejected.
 #[derive(Debug, Deserialize)]
 pub struct QuoteQuery {
     pub amount_in: u128,
+    /// JSON-serialised AssetId, URL-encoded.
     pub token_in: String,
-    /// Optional slippage tolerance in bps (e.g. 50 = 0.5%). When provided,
-    /// `min_amount_out` is returned alongside the expected output.
     pub slippage_bps: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct ReverseQuoteQuery {
     pub amount_out: u128,
+    /// JSON-serialised AssetId, URL-encoded.
     pub token_out: String,
 }
 
@@ -49,7 +51,7 @@ pub struct SimulateAddQuery {
     pub amount_1: u128,
 }
 
-// ── Existing handlers ─────────────────────────────────────────────────────────
+// ── Handlers ──────────────────────────────────────────────────────────────────
 
 pub async fn reserves(State(ctx): State<AppState>) -> Result<impl IntoResponse, EngineError> {
     let pool = pool_or_err(&ctx)?;
@@ -60,8 +62,9 @@ pub async fn quote(
     State(ctx): State<AppState>,
     Query(q): Query<QuoteQuery>,
 ) -> Result<impl IntoResponse, EngineError> {
+    let token_in: AssetId = parse_asset_param(&q.token_in, "token_in")?;
     let pool = pool_or_err(&ctx)?;
-    let pq = pool.get_quote(q.amount_in, &q.token_in).await?;
+    let pq = pool.get_quote(q.amount_in, &token_in).await?;
 
     let mut body = serde_json::json!({
         "amount_in":        pq.amount_in.to_string(),
@@ -84,29 +87,27 @@ pub async fn quote(
 
 /// Reverse quote: given a desired output amount, return the required input.
 /// Uses `get_amount_in` (exact-output swap pricing).
+/// `effective_price` is the exact rational `amount_in / amount_out`.
 pub async fn reverse_quote(
     State(ctx): State<AppState>,
     Query(q): Query<ReverseQuoteQuery>,
 ) -> Result<impl IntoResponse, EngineError> {
+    let token_out: AssetId = parse_asset_param(&q.token_out, "token_out")?;
     let pool = pool_or_err(&ctx)?;
     let reserves = pool.get_reserves().await?;
 
-    let (reserve_out, reserve_in, token_in) = if q.token_out == reserves.token_0 {
-        (
-            reserves.reserve_0,
-            reserves.reserve_1,
-            reserves.token_1.clone(),
-        )
-    } else if q.token_out == reserves.token_1 {
-        (
-            reserves.reserve_1,
-            reserves.reserve_0,
-            reserves.token_0.clone(),
-        )
+    let key_out = token_out.canonical_key();
+    let key_0 = reserves.token_0.canonical_key();
+    let key_1 = reserves.token_1.canonical_key();
+
+    let (reserve_out, reserve_in, token_in) = if key_out == key_0 {
+        (reserves.reserve_0, reserves.reserve_1, reserves.token_1.clone())
+    } else if key_out == key_1 {
+        (reserves.reserve_1, reserves.reserve_0, reserves.token_0.clone())
     } else {
         return Err(EngineError::InvalidRequest(format!(
-            "token '{}' is not in this pool",
-            q.token_out
+            "asset '{}' (key: '{key_out}') is not in this pool",
+            token_out.symbol
         )));
     };
 
@@ -115,17 +116,17 @@ pub async fn reverse_quote(
 
     let price_impact = math::price_impact_bps(amount_in, reserve_in);
     let effective_price = if q.amount_out > 0 {
-        amount_in as f64 / q.amount_out as f64
+        RationalPrice::new(amount_in, q.amount_out)
     } else {
-        0.0
+        RationalPrice::zero()
     };
 
     Ok(Json(serde_json::json!({
         "amount_in":        amount_in.to_string(),
         "amount_out":       q.amount_out.to_string(),
         "token_in":         token_in,
-        "token_out":        q.token_out,
-        "fee_bps":          math::FEE_DENOMINATOR - math::FEE_NUMERATOR,
+        "token_out":        token_out,
+        "fee_bps":          (math::FEE_DENOMINATOR - math::FEE_NUMERATOR) * 10,
         "price_impact_bps": price_impact,
         "effective_price":  effective_price,
     })))
@@ -143,14 +144,11 @@ pub async fn lp_balance(
     })))
 }
 
-/// Simulate remove-liquidity for an address: fetches their LP balance then
-/// computes the XLM/USDC they would receive on full withdrawal.
 pub async fn simulate_remove_liquidity(
     State(ctx): State<AppState>,
     Query(q): Query<SimulateRemoveQuery>,
 ) -> Result<impl IntoResponse, EngineError> {
     let pool = pool_or_err(&ctx)?;
-
     let (lp_balance, reserves) =
         tokio::try_join!(pool.lp_balance(&q.address), pool.get_reserves())?;
 
@@ -187,8 +185,6 @@ pub async fn simulate_remove_liquidity(
     })))
 }
 
-/// Simulate add-liquidity: given desired token amounts, compute estimated LP
-/// tokens to be minted using current reserves.
 pub async fn simulate_add_liquidity(
     State(ctx): State<AppState>,
     Query(q): Query<SimulateAddQuery>,
@@ -197,15 +193,12 @@ pub async fn simulate_add_liquidity(
     let reserves = pool.get_reserves().await?;
 
     let lp_minted = math::lp_tokens_to_mint(
-        q.amount_0,
-        q.amount_1,
-        reserves.reserve_0,
-        reserves.reserve_1,
+        q.amount_0, q.amount_1,
+        reserves.reserve_0, reserves.reserve_1,
         reserves.lp_total_supply,
     )
     .map_err(|e| EngineError::InvalidRequest(e.to_string()))?;
 
-    // Optimal amounts respect the current ratio; the smaller side dictates LP minted.
     let optimal_amount_0 = (q.amount_1 * reserves.reserve_0)
         .checked_div(reserves.reserve_1)
         .unwrap_or(q.amount_0);
@@ -214,41 +207,42 @@ pub async fn simulate_add_liquidity(
         .unwrap_or(q.amount_1);
 
     Ok(Json(serde_json::json!({
-        "lp_tokens_minted":   lp_minted.to_string(),
-        "amount_0_used":      optimal_amount_0.min(q.amount_0).to_string(),
-        "amount_1_used":      optimal_amount_1.min(q.amount_1).to_string(),
-        "token_0":            reserves.token_0,
-        "token_1":            reserves.token_1,
+        "lp_tokens_minted":       lp_minted.to_string(),
+        "amount_0_used":          optimal_amount_0.min(q.amount_0).to_string(),
+        "amount_1_used":          optimal_amount_1.min(q.amount_1).to_string(),
+        "token_0":                reserves.token_0,
+        "token_1":                reserves.token_1,
         "lp_total_supply_before": reserves.lp_total_supply.to_string(),
     })))
 }
 
+/// Spot prices as exact rationals — no f64.
 pub async fn pool_stats(State(ctx): State<AppState>) -> Result<impl IntoResponse, EngineError> {
     let pool = pool_or_err(&ctx)?;
     let reserves = pool.get_reserves().await?;
 
     let price_0_in_1 = if reserves.reserve_0 > 0 {
-        reserves.reserve_1 as f64 / reserves.reserve_0 as f64
+        RationalPrice::new(reserves.reserve_1, reserves.reserve_0)
     } else {
-        0.0
+        RationalPrice::zero()
     };
     let price_1_in_0 = if reserves.reserve_1 > 0 {
-        reserves.reserve_0 as f64 / reserves.reserve_1 as f64
+        RationalPrice::new(reserves.reserve_0, reserves.reserve_1)
     } else {
-        0.0
+        RationalPrice::zero()
     };
     let k = reserves.reserve_0.saturating_mul(reserves.reserve_1);
 
     Ok(Json(serde_json::json!({
-        "reserves":              reserves,
+        "reserves":               reserves,
         "price_token0_in_token1": price_0_in_1,
         "price_token1_in_token0": price_1_in_0,
-        "k_invariant":           k.to_string(),
-        "fee_bps":               math::FEE_DENOMINATOR - math::FEE_NUMERATOR,
+        "k_invariant":            k.to_string(),
+        "fee_bps":                (math::FEE_DENOMINATOR - math::FEE_NUMERATOR) * 10,
     })))
 }
 
-// ── Prepare (construct + simulate; returns prepared XDR + review summary) ──────
+// ── Prepare ───────────────────────────────────────────────────────────────────
 
 fn parse_network(s: &str) -> Result<Network, EngineError> {
     Network::parse(s)
@@ -309,20 +303,12 @@ pub async fn build_add_liquidity(
 ) -> Result<impl IntoResponse, EngineError> {
     let pool = pool_or_err(&ctx)?;
     let network = parse_network(&req.network)?;
-    let params = PrepareParams {
-        network,
-        source_account: req.from.clone(),
-        deadline: req.deadline,
-    };
     let prepared = pool
         .prepare_add_liquidity(
-            &req.from,
-            &req.to,
-            req.amount_0_desired,
-            req.amount_1_desired,
-            req.amount_0_min,
-            req.amount_1_min,
-            params,
+            &req.from, &req.to,
+            req.amount_0_desired, req.amount_1_desired,
+            req.amount_0_min, req.amount_1_min,
+            PrepareParams { network, source_account: req.from.clone(), deadline: req.deadline },
         )
         .await?;
     Ok(Json(prepared))
@@ -345,25 +331,17 @@ pub async fn build_remove_liquidity(
 ) -> Result<impl IntoResponse, EngineError> {
     let pool = pool_or_err(&ctx)?;
     let network = parse_network(&req.network)?;
-    let params = PrepareParams {
-        network,
-        source_account: req.from.clone(),
-        deadline: req.deadline,
-    };
     let prepared = pool
         .prepare_remove_liquidity(
-            &req.from,
-            &req.to,
-            req.liquidity,
-            req.amount_0_min,
-            req.amount_1_min,
-            params,
+            &req.from, &req.to,
+            req.liquidity, req.amount_0_min, req.amount_1_min,
+            PrepareParams { network, source_account: req.from.clone(), deadline: req.deadline },
         )
         .await?;
     Ok(Json(prepared))
 }
 
-// ── Validate (decode + policy-check any prepared transaction XDR) ──────────────
+// ── Validate ──────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Deserialize)]
 pub struct ValidateRequest {
@@ -384,14 +362,10 @@ pub async fn validate(
     Ok(Json(review))
 }
 
-// ── Submit (engine-owned submission: sendTransaction + poll getTransaction) ────
+// ── Submit ────────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Deserialize)]
 pub struct SubmitRequest {
-    /// The fully-signed transaction envelope XDR. The engine never signs
-    /// anything — it only relays this to Soroban RPC and polls for the
-    /// result. Callers who want to keep submission ownership themselves
-    /// simply never call this endpoint.
     pub signed_xdr: String,
 }
 
@@ -410,7 +384,7 @@ pub async fn not_configured() -> impl IntoResponse {
         StatusCode::SERVICE_UNAVAILABLE,
         Json(serde_json::json!({
             "code":    "POOL_NOT_CONFIGURED",
-            "message": "POOL_CONTRACT_ID, SOROBAN_RPC_URL, POOL_TOKEN_0, POOL_TOKEN_1 must be set",
+            "message": "POOL_CONTRACT_ID, SOROBAN_RPC_URL, POOL_TOKEN_0_JSON, POOL_TOKEN_1_JSON must be set",
         })),
     )
 }
@@ -425,4 +399,14 @@ fn pool_or_err(ctx: &AppContext) -> Result<&crate::pool::ContractClient, EngineE
 
 fn apply_slippage(amount: u128, slippage_bps: u64) -> u128 {
     amount.saturating_mul(10_000 - slippage_bps as u128) / 10_000
+}
+
+/// Parses a JSON-encoded [`AssetId`] from a query-string parameter value.
+/// Returns a clear error if the value is not valid JSON or not a valid AssetId.
+fn parse_asset_param(value: &str, param_name: &str) -> Result<AssetId, EngineError> {
+    serde_json::from_str::<AssetId>(value).map_err(|e| {
+        EngineError::InvalidRequest(format!(
+            "'{param_name}' must be a JSON-encoded AssetId: {e}"
+        ))
+    })
 }

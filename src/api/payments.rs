@@ -1,13 +1,14 @@
+use std::time::Duration;
+
 use axum::{
     extract::{Path, State},
     http::StatusCode,
     response::{IntoResponse, Json, Response},
 };
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 
 use crate::api::AppState;
-use crate::utils::{ApiError, EngineError, Urgency};
+use crate::utils::{ApiError, AssetId, EngineError, Urgency};
 
 impl IntoResponse for EngineError {
     fn into_response(self) -> Response {
@@ -42,8 +43,10 @@ impl IntoResponse for EngineError {
 pub struct InitiateRequest {
     pub sender: String,
     pub recipient: String,
+    /// Amount in integer base units of `asset`.
     pub amount: u64,
-    pub token: String,
+    /// Canonical asset identity. Replaces the old bare `token` string.
+    pub asset: AssetId,
     #[serde(default)]
     pub urgency: Urgency,
     pub idempotency_key: Option<String>,
@@ -52,54 +55,48 @@ pub struct InitiateRequest {
 pub async fn initiate(
     State(ctx): State<AppState>,
     Json(req): Json<InitiateRequest>,
-) -> Result<(StatusCode, impl IntoResponse), EngineError> {
-    let fingerprint = request_fingerprint(&req);
-    if let Some(ref key) = req.idempotency_key {
-        match ctx.engine.idempotency().get(key).await {
-            Ok(Some(cached)) => {
-                if cached["request_fingerprint"] != fingerprint {
-                    crate::observability::counter("nodus_idempotency_conflicts_total");
-                    return Err(EngineError::Conflict(
-                        "idempotency key reused with a different request".into(),
-                    ));
-                }
-                return Ok((
-                    StatusCode::OK,
-                    Json(cached["response"].clone()).into_response(),
-                ));
-            }
-            Err(e) => {
-                tracing::warn!(error = %e, "idempotency get failed, proceeding as first request")
-            }
-            _ => {}
-        }
-    }
+) -> Result<Response, EngineError> {
+    // No idempotency key — run the work unconditionally.
+    let Some(client_key) = req.idempotency_key.clone() else {
+        let payment = ctx
+            .engine
+            .initiate(
+                req.sender,
+                req.recipient,
+                req.amount,
+                req.token,
+                req.urgency,
+            )
+            .await?;
+        return Ok((StatusCode::CREATED, Json(payment)).into_response());
+    };
 
-    let payment = ctx
+    let network = match ctx.config.network {
+        Network::Mainnet => "mainnet",
+        Network::Testnet => "testnet",
+    };
+    let namespace = IdempotencyNamespace::new(network, "payments.initiate");
+    let request_body = serde_json::to_value(&req).unwrap_or_default();
+
+    let outcome = ctx
         .engine
         .initiate(
             req.sender,
             req.recipient,
             req.amount,
-            req.token,
+            req.asset,
             req.urgency,
         )
         .await?;
 
-    if let Some(key) = req.idempotency_key {
-        let body = serde_json::to_value(&payment).unwrap_or_default();
-        let cached = serde_json::json!({"request_fingerprint": fingerprint, "response": body});
-        if let Err(e) = ctx.engine.idempotency().set(key, cached).await {
-            tracing::warn!(error = %e, "failed to store idempotency key");
+    Ok(match outcome {
+        IdempotentInitiation::Executed(payment) => {
+            (StatusCode::CREATED, Json(payment)).into_response()
         }
-    }
-
-    Ok((StatusCode::CREATED, Json(payment).into_response()))
-}
-
-fn request_fingerprint(request: &InitiateRequest) -> String {
-    let bytes = serde_json::to_vec(request).unwrap_or_default();
-    hex::encode(Sha256::digest(bytes))
+        IdempotentInitiation::Replayed(response) => {
+            (StatusCode::OK, Json(response)).into_response()
+        }
+    })
 }
 
 pub async fn get(
@@ -118,7 +115,7 @@ pub struct SimulateRequest {
     pub sender: String,
     pub recipient: String,
     pub amount: u64,
-    pub token: String,
+    pub asset: AssetId,
     #[serde(default)]
     pub urgency: Urgency,
 }
@@ -129,13 +126,7 @@ pub async fn simulate(
 ) -> Result<impl IntoResponse, EngineError> {
     let result = ctx
         .engine
-        .simulate(
-            req.sender,
-            req.recipient,
-            req.amount,
-            req.token,
-            req.urgency,
-        )
+        .simulate(req.sender, req.recipient, req.amount, req.asset, req.urgency)
         .await?;
     Ok(Json(result))
 }
@@ -147,7 +138,8 @@ pub struct Receipt {
     pub sender: String,
     pub recipient: String,
     pub amount: u64,
-    pub token: String,
+    /// Full canonical asset identity.
+    pub asset: AssetId,
     pub chain: String,
     pub confirmed_at: String,
 }
@@ -166,7 +158,7 @@ pub async fn receipt(
         sender: payment.sender,
         recipient: payment.recipient,
         amount: payment.amount,
-        token: payment.token,
+        asset: payment.asset,
         chain: "stellar".into(),
         confirmed_at: payment.updated_at,
     }))
