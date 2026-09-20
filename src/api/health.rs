@@ -22,3 +22,32 @@ pub async fn readyz(State(ctx): State<AppState>) -> impl IntoResponse {
 pub async fn metrics() -> impl IntoResponse {
     crate::observability::encode("metrics")
 }
+
+pub async fn reconciliation_status(State(ctx): State<AppState>) -> impl IntoResponse {
+    match &ctx.reconciliation {
+        Some(recon) => match recon.status().await {
+            Ok(resp) => (
+                StatusCode::OK,
+                Json(serde_json::to_value(resp).unwrap_or_default()),
+            ),
+            Err(_) => (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "caught_up": false,
+                    "lag": 999,
+                    "lag_seconds": 999,
+                    "last_indexed_ledger": 0,
+                })),
+            ),
+        },
+        None => (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "caught_up": true,
+                "lag": 0,
+                "lag_seconds": 0,
+                "last_indexed_ledger": 0,
+            })),
+        ),
+    }
+}

@@ -74,6 +74,8 @@ pub async fn quote(
         "fee_bps":          pq.fee_bps,
         "price_impact_bps": pq.price_impact_bps,
         "effective_price":  pq.effective_price,
+        "source_ledger":    pq.source_ledger,
+        "freshness_seconds": pq.freshness_seconds,
     });
 
     if let Some(slippage_bps) = q.slippage_bps {
@@ -101,9 +103,17 @@ pub async fn reverse_quote(
     let key_1 = reserves.token_1.canonical_key();
 
     let (reserve_out, reserve_in, token_in) = if key_out == key_0 {
-        (reserves.reserve_0, reserves.reserve_1, reserves.token_1.clone())
+        (
+            reserves.reserve_0,
+            reserves.reserve_1,
+            reserves.token_1.clone(),
+        )
     } else if key_out == key_1 {
-        (reserves.reserve_1, reserves.reserve_0, reserves.token_0.clone())
+        (
+            reserves.reserve_1,
+            reserves.reserve_0,
+            reserves.token_0.clone(),
+        )
     } else {
         return Err(EngineError::InvalidRequest(format!(
             "asset '{}' (key: '{key_out}') is not in this pool",
@@ -193,8 +203,10 @@ pub async fn simulate_add_liquidity(
     let reserves = pool.get_reserves().await?;
 
     let lp_minted = math::lp_tokens_to_mint(
-        q.amount_0, q.amount_1,
-        reserves.reserve_0, reserves.reserve_1,
+        q.amount_0,
+        q.amount_1,
+        reserves.reserve_0,
+        reserves.reserve_1,
         reserves.lp_total_supply,
     )
     .map_err(|e| EngineError::InvalidRequest(e.to_string()))?;
@@ -305,10 +317,17 @@ pub async fn build_add_liquidity(
     let network = parse_network(&req.network)?;
     let prepared = pool
         .prepare_add_liquidity(
-            &req.from, &req.to,
-            req.amount_0_desired, req.amount_1_desired,
-            req.amount_0_min, req.amount_1_min,
-            PrepareParams { network, source_account: req.from.clone(), deadline: req.deadline },
+            &req.from,
+            &req.to,
+            req.amount_0_desired,
+            req.amount_1_desired,
+            req.amount_0_min,
+            req.amount_1_min,
+            PrepareParams {
+                network,
+                source_account: req.from.clone(),
+                deadline: req.deadline,
+            },
         )
         .await?;
     Ok(Json(prepared))
@@ -333,9 +352,16 @@ pub async fn build_remove_liquidity(
     let network = parse_network(&req.network)?;
     let prepared = pool
         .prepare_remove_liquidity(
-            &req.from, &req.to,
-            req.liquidity, req.amount_0_min, req.amount_1_min,
-            PrepareParams { network, source_account: req.from.clone(), deadline: req.deadline },
+            &req.from,
+            &req.to,
+            req.liquidity,
+            req.amount_0_min,
+            req.amount_1_min,
+            PrepareParams {
+                network,
+                source_account: req.from.clone(),
+                deadline: req.deadline,
+            },
         )
         .await?;
     Ok(Json(prepared))

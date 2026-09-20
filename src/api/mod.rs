@@ -19,6 +19,7 @@ pub struct AppContext {
     pub rates: RateService,
     pub webhooks: Arc<WebhookStore>,
     pub pool: Option<ContractClient>,
+    pub reconciliation: Option<Arc<crate::engine::reconciliation::ReconciliationManager>>,
     pub config: Config,
 }
 

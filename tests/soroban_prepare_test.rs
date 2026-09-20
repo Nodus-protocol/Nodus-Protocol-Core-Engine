@@ -148,11 +148,20 @@ impl RpcTransport for FakeTransport {
 fn client(transport: FakeTransport, fee_ceiling_stroops: u32) -> ContractClient {
     let pool = PoolConfig {
         soroban_rpc_url: "http://unused.invalid".into(),
+        soroban_rpc_urls: vec!["http://unused.invalid".into()],
         contract_id: contract_strkey(),
-        token_0: "XLM".into(),
-        token_1: "USDC".into(),
+        token_0: nodus_core_engine::utils::AssetId::native("testnet"),
+        token_1: nodus_core_engine::utils::AssetId {
+            network: "testnet".into(),
+            asset_type: nodus_core_engine::utils::AssetType::ContractToken,
+            symbol: "USDC".into(),
+            decimals: 7,
+            issuer: None,
+            contract: Some(contract_strkey()),
+        },
         base_fee_stroops: 100,
         fee_ceiling_stroops,
+        provider_divergence_max_ledgers: 5,
     };
     ContractClient::new(
         SorobanRpc::with_transport(Box::new(transport)),

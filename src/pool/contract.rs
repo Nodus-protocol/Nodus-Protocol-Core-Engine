@@ -1,14 +1,22 @@
+use base64::engine::general_purpose::STANDARD as B64;
+use base64::Engine;
 use serde::Serialize;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
 
 use crate::config::{Network, PoolConfig};
 use crate::pool::abi::PoolFunction;
 use crate::pool::prepare::{self, PrepareParams, PreparedTransaction};
+use crate::pool::provider::{ProviderPool, MAX_LEDGER_AGE_SECS};
 use crate::pool::{math, soroban::SorobanRpc, xdr};
 use crate::utils::{AssetId, EngineError, RationalPrice};
 
 const CACHE_TTL: Duration = Duration::from_secs(30);
+
+fn i128_to_u128(v: i128) -> Option<u128> {
+    u128::try_from(v).ok()
+}
 
 /// Current on-chain reserve state. `token_0`/`token_1` carry the full
 /// canonical [`AssetId`] — ordering is fixed by the deployed contract.
@@ -40,11 +48,19 @@ pub struct PriceQuote {
     /// Exact rational `amount_in / amount_out` as `{numerator, denominator}`
     /// decimal strings. Scale by token decimals for human-readable price.
     pub effective_price: RationalPrice,
+    /// Ledger sequence from which reserves were read.
+    pub source_ledger: u32,
+    /// Freshness age in seconds of the source ledger close time.
+    pub freshness_seconds: u64,
 }
 
 struct CachedReserves {
+    network: Network,
+    contract_id: String,
+    source_ledger: u32,
     data: PoolReserves,
     fetched_at: Instant,
+    ledger_close_time: u64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -58,6 +74,7 @@ pub struct SubmitResult {
 
 pub struct ContractClient {
     rpc: SorobanRpc,
+    providers: Option<Arc<ProviderPool>>,
     pool: PoolConfig,
     network: Network,
     cache: RwLock<Option<CachedReserves>>,
@@ -65,12 +82,61 @@ pub struct ContractClient {
 
 impl ContractClient {
     pub fn new(rpc: SorobanRpc, pool: &PoolConfig, network: Network) -> Self {
+        let valid_urls: Vec<String> = if !pool.soroban_rpc_urls.is_empty() {
+            pool.soroban_rpc_urls
+                .iter()
+                .filter(|u| !u.is_empty() && !u.contains("unused.invalid"))
+                .cloned()
+                .collect()
+        } else if !pool.soroban_rpc_url.is_empty()
+            && !pool.soroban_rpc_url.contains("unused.invalid")
+        {
+            vec![pool.soroban_rpc_url.clone()]
+        } else {
+            Vec::new()
+        };
+
+        let providers = if !valid_urls.is_empty() {
+            Some(Arc::new(ProviderPool::new(
+                &valid_urls,
+                network,
+                pool.provider_divergence_max_ledgers,
+            )))
+        } else {
+            None
+        };
+
         Self {
             rpc,
+            providers,
             pool: pool.clone(),
             network,
             cache: RwLock::new(None),
         }
+    }
+
+    #[allow(dead_code)]
+    pub fn with_provider_pool(
+        providers: Arc<ProviderPool>,
+        pool: &PoolConfig,
+        network: Network,
+    ) -> Self {
+        Self {
+            rpc: SorobanRpc::new(&providers.primary_endpoint()),
+            providers: Some(providers),
+            pool: pool.clone(),
+            network,
+            cache: RwLock::new(None),
+        }
+    }
+
+    pub fn providers(&self) -> Option<Arc<ProviderPool>> {
+        self.providers.clone()
+    }
+
+    #[allow(dead_code)]
+    pub fn provider_pool(&self) -> Option<Arc<ProviderPool>> {
+        self.providers.clone()
     }
 
     fn contract_id(&self) -> &str {
@@ -78,36 +144,60 @@ impl ContractClient {
     }
 
     pub async fn get_reserves(&self) -> Result<PoolReserves, EngineError> {
+        self.get_reserves_with_freshness()
+            .await
+            .map(|(reserves, _, _)| reserves)
+    }
+
+    pub async fn get_reserves_with_freshness(
+        &self,
+    ) -> Result<(PoolReserves, u32, u64), EngineError> {
+        let now_unix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+
         {
             let guard = self.cache.read().await;
             if let Some(ref c) = *guard {
-                if c.fetched_at.elapsed() < CACHE_TTL {
-                    crate::observability::gauge(
-                        "nodus_quote_cache_hit_age_seconds",
-                        c.fetched_at.elapsed().as_secs_f64(),
-                    );
-                    return Ok(c.data.clone());
+                if c.network == self.network
+                    && c.contract_id == self.pool.contract_id
+                    && c.fetched_at.elapsed() < CACHE_TTL
+                {
+                    let age = now_unix.saturating_sub(c.ledger_close_time);
+                    if age <= MAX_LEDGER_AGE_SECS {
+                        crate::observability::gauge(
+                            "nodus_quote_cache_hit_age_seconds",
+                            c.fetched_at.elapsed().as_secs_f64(),
+                        );
+                        crate::observability::gauge(
+                            "nodus_quote_source_ledger",
+                            c.source_ledger as f64,
+                        );
+                        crate::observability::gauge("nodus_quote_age_seconds", age as f64);
+                        return Ok((c.data.clone(), c.source_ledger, age));
+                    }
                 }
             }
         }
 
-        let reserves = self.fetch_reserves().await?;
-        crate::observability::gauge(
-            "nodus_quote_age_seconds",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs()
-                .saturating_sub(reserves.timestamp_last) as f64,
-        );
+        let (reserves, source_ledger, close_time) = self.fetch_reserves_with_metadata().await?;
+        let age = now_unix.saturating_sub(close_time);
+
+        crate::observability::gauge("nodus_quote_source_ledger", source_ledger as f64);
+        crate::observability::gauge("nodus_quote_age_seconds", age as f64);
 
         let mut guard = self.cache.write().await;
         *guard = Some(CachedReserves {
+            network: self.network,
+            contract_id: self.pool.contract_id.clone(),
+            source_ledger,
             data: reserves.clone(),
             fetched_at: Instant::now(),
+            ledger_close_time: close_time,
         });
 
-        Ok(reserves)
+        Ok((reserves, source_ledger, age))
     }
 
     /// Token direction is resolved by canonical key (contract address or
@@ -117,16 +207,25 @@ impl ContractClient {
         amount_in: u128,
         token_in: &AssetId,
     ) -> Result<PriceQuote, EngineError> {
-        let reserves = self.get_reserves().await?;
+        let (reserves, source_ledger, freshness_seconds) =
+            self.get_reserves_with_freshness().await?;
 
         let key_in = token_in.canonical_key();
         let key_0 = reserves.token_0.canonical_key();
         let key_1 = reserves.token_1.canonical_key();
 
         let (reserve_in, reserve_out, token_out) = if key_in == key_0 {
-            (reserves.reserve_0, reserves.reserve_1, reserves.token_1.clone())
+            (
+                reserves.reserve_0,
+                reserves.reserve_1,
+                reserves.token_1.clone(),
+            )
         } else if key_in == key_1 {
-            (reserves.reserve_1, reserves.reserve_0, reserves.token_0.clone())
+            (
+                reserves.reserve_1,
+                reserves.reserve_0,
+                reserves.token_0.clone(),
+            )
         } else {
             return Err(EngineError::InvalidRequest(format!(
                 "asset '{}' (key: '{key_in}') is not in this pool \
@@ -153,6 +252,8 @@ impl ContractClient {
             fee_bps: ((math::FEE_DENOMINATOR - math::FEE_NUMERATOR) * 10) as u64,
             price_impact_bps: price_impact,
             effective_price,
+            source_ledger,
+            freshness_seconds,
         })
     }
 
@@ -207,7 +308,15 @@ impl ContractClient {
     ) -> Result<PreparedTransaction, EngineError> {
         let deadline = params.deadline;
         let args = prepare::encode_swap_args(to, amount_0_out, amount_1_out, deadline)?;
-        prepare::prepare(&self.rpc, &self.pool, &self.network, PoolFunction::Swap, args, params).await
+        prepare::prepare(
+            &self.rpc,
+            &self.pool,
+            &self.network,
+            PoolFunction::Swap,
+            args,
+            params,
+        )
+        .await
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -223,9 +332,23 @@ impl ContractClient {
     ) -> Result<PreparedTransaction, EngineError> {
         let deadline = params.deadline;
         let args = prepare::encode_add_liquidity_args(
-            from, to, amount_0_desired, amount_1_desired, amount_0_min, amount_1_min, deadline,
+            from,
+            to,
+            amount_0_desired,
+            amount_1_desired,
+            amount_0_min,
+            amount_1_min,
+            deadline,
         )?;
-        prepare::prepare(&self.rpc, &self.pool, &self.network, PoolFunction::AddLiquidity, args, params).await
+        prepare::prepare(
+            &self.rpc,
+            &self.pool,
+            &self.network,
+            PoolFunction::AddLiquidity,
+            args,
+            params,
+        )
+        .await
     }
 
     pub async fn prepare_remove_liquidity(
@@ -239,9 +362,22 @@ impl ContractClient {
     ) -> Result<PreparedTransaction, EngineError> {
         let deadline = params.deadline;
         let args = prepare::encode_remove_liquidity_args(
-            from, to, liquidity, amount_0_min, amount_1_min, deadline,
+            from,
+            to,
+            liquidity,
+            amount_0_min,
+            amount_1_min,
+            deadline,
         )?;
-        prepare::prepare(&self.rpc, &self.pool, &self.network, PoolFunction::RemoveLiquidity, args, params).await
+        prepare::prepare(
+            &self.rpc,
+            &self.pool,
+            &self.network,
+            PoolFunction::RemoveLiquidity,
+            args,
+            params,
+        )
+        .await
     }
 
     pub async fn validate_transaction(
@@ -266,12 +402,22 @@ impl ContractClient {
                 fee_ceiling_stroops: self.pool.fee_ceiling_stroops,
                 now,
                 expected_sequence,
+                current_ledger: None,
+                simulation_ledger: None,
             },
         )
     }
 
     pub async fn submit_transaction(&self, signed_xdr: &str) -> Result<SubmitResult, EngineError> {
-        let sent = self.rpc.send_transaction(signed_xdr).await?;
+        let tx_hash = derive_tx_hash_from_xdr(signed_xdr)?;
+        tracing::info!(%tx_hash, "initiating verified transaction submission");
+
+        let sent = if let Some(ref pool) = self.providers {
+            pool.send_transaction(signed_xdr).await?
+        } else {
+            self.rpc.send_transaction(signed_xdr).await?
+        };
+
         if sent.status != "PENDING" && sent.status != "DUPLICATE" {
             return Err(EngineError::PreconditionFailed(format!(
                 "sendTransaction returned {}: {}",
@@ -285,7 +431,12 @@ impl ContractClient {
 
         for attempt in 1..=MAX_POLLS {
             tokio::time::sleep(POLL_DELAY).await;
-            let got = self.rpc.get_transaction(&sent.hash).await?;
+            let got = if let Some(ref pool) = self.providers {
+                pool.get_transaction(&sent.hash).await?
+            } else {
+                self.rpc.get_transaction(&sent.hash).await?
+            };
+
             if got.status != "NOT_FOUND" {
                 return Ok(SubmitResult {
                     hash: sent.hash,
@@ -297,6 +448,14 @@ impl ContractClient {
             }
         }
 
+        // Before returning NOT_FOUND or deciding on resend, check ALL approved providers
+        if let Some(ref pool) = self.providers {
+            let consensus_ledger = pool.latest_consensus_ledger();
+            let _ = pool
+                .check_all_approved_unanimous_not_found(&sent.hash, consensus_ledger)
+                .await;
+        }
+
         Ok(SubmitResult {
             hash: sent.hash,
             send_status: sent.status,
@@ -306,8 +465,19 @@ impl ContractClient {
         })
     }
 
-    async fn fetch_reserves(&self) -> Result<PoolReserves, EngineError> {
-        let map = self.fetch_pool_instance_map().await?;
+    async fn fetch_reserves_with_metadata(&self) -> Result<(PoolReserves, u32, u64), EngineError> {
+        let now_unix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+
+        let (map, source_ledger, close_time) = if let Some(ref pool) = self.providers {
+            pool.read_reserves_with_quorum(self.contract_id()).await?
+        } else {
+            let map = self.fetch_pool_instance_map().await?;
+            let ledger = self.rpc.get_latest_ledger().await.unwrap_or(0);
+            (map, ledger, now_unix)
+        };
 
         let reserve_0 = xdr::instance_i128(&map, "Reserve0").and_then(|v| {
             i128_to_u128(v).ok_or_else(|| {
@@ -321,21 +491,21 @@ impl ContractClient {
         })?;
         let timestamp_last = xdr::instance_u64(&map, "TimestampLast")?;
 
-        // LP total supply is not part of the pool's own storage: it lives on
-        // the SEP-41 LP token contract (see the pool's DataKey::LpToken). Read
-        // it from the actual LP token contract instance rather than scanning
-        // the pool for an "LpTotalSup" fragment that does not exist.
         let lp_token = xdr::address_to_string(&xdr::instance_address(&map, "LpToken")?);
         let lp_total_supply = self.read_lp_total_supply(&lp_token).await?;
 
-        Ok(PoolReserves {
-            reserve_0,
-            reserve_1,
-            token_0: self.pool.token_0.clone(),
-            token_1: self.pool.token_1.clone(),
-            lp_total_supply,
-            timestamp_last,
-        })
+        Ok((
+            PoolReserves {
+                reserve_0,
+                reserve_1,
+                token_0: self.pool.token_0.clone(),
+                token_1: self.pool.token_1.clone(),
+                lp_total_supply,
+                timestamp_last,
+            },
+            source_ledger,
+            close_time,
+        ))
     }
 
     /// Reads and decodes the pool contract's typed instance storage map
@@ -350,9 +520,10 @@ impl ContractClient {
             crate::observability::gauge("nodus_quote_source_ledger", ledger as f64);
         }
         crate::observability::gauge("nodus_provider_divergence_ledgers", 0.0);
-        parse_instance_storage(&entries[0].xdr, &self.pool.token_0, &self.pool.token_1)
+        xdr::decode_instance_storage(&entries[0].xdr)
     }
 
+    #[allow(dead_code)]
     fn lp_balance_key_xdr(&self, address: &str) -> Result<String, EngineError> {
         let contract_bytes = parse_contract_id(self.contract_id())?;
         let addr_bytes = parse_contract_id(address)?;
@@ -375,6 +546,7 @@ impl ContractClient {
     }
 }
 
+#[allow(dead_code)]
 fn parse_contract_id(id: &str) -> Result<Vec<u8>, EngineError> {
     let clean = id.trim_start_matches("C");
     hex::decode(clean)
@@ -393,6 +565,7 @@ fn parse_contract_id(id: &str) -> Result<Vec<u8>, EngineError> {
         })
 }
 
+#[allow(dead_code)]
 fn pad4(buf: &mut Vec<u8>, len: usize) {
     let rem = len % 4;
     if rem != 0 {
@@ -400,6 +573,7 @@ fn pad4(buf: &mut Vec<u8>, len: usize) {
     }
 }
 
+#[allow(dead_code)]
 fn parse_i128_from_xdr(xdr: &str) -> Result<u128, EngineError> {
     let bytes = B64
         .decode(xdr)
@@ -415,6 +589,7 @@ fn parse_i128_from_xdr(xdr: &str) -> Result<u128, EngineError> {
     Ok((hi as u128) << 64 | lo as u128)
 }
 
+#[allow(dead_code)]
 fn parse_instance_storage(
     xdr: &str,
     token_0: &AssetId,
@@ -439,6 +614,7 @@ fn parse_instance_storage(
     })
 }
 
+#[allow(dead_code)]
 fn extract_i128_by_key(buf: &[u8], key: &[u8]) -> Option<u128> {
     let pos = buf.windows(key.len()).position(|w| w == key)?;
     let start = pos + key.len();
@@ -453,6 +629,7 @@ fn extract_i128_by_key(buf: &[u8], key: &[u8]) -> Option<u128> {
     Some((hi as u128) << 64 | lo as u128)
 }
 
+#[allow(dead_code)]
 fn extract_u64_by_key(buf: &[u8], key: &[u8]) -> Option<u64> {
     let pos = buf.windows(key.len()).position(|w| w == key)?;
     let start = pos + key.len();
@@ -460,4 +637,15 @@ fn extract_u64_by_key(buf: &[u8], key: &[u8]) -> Option<u64> {
         return None;
     }
     Some(u64::from_be_bytes(buf[start..start + 8].try_into().ok()?))
+}
+
+pub fn derive_tx_hash_from_xdr(signed_xdr: &str) -> Result<String, EngineError> {
+    use base64::Engine;
+    use sha2::Digest;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(signed_xdr.trim())
+        .map_err(|e| EngineError::InvalidRequest(format!("invalid base64 XDR: {e}")))?;
+
+    let hash = sha2::Sha256::digest(&bytes);
+    Ok(hex::encode(hash))
 }

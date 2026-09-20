@@ -81,11 +81,20 @@ impl RpcTransport for MapTransport {
 fn client(transport: MapTransport) -> ContractClient {
     let pool = PoolConfig {
         soroban_rpc_url: "http://unused.invalid".into(),
+        soroban_rpc_urls: vec![],
         contract_id: contract_strkey(1),
-        token_0: "XLM".into(),
-        token_1: "USDC".into(),
+        token_0: nodus_core_engine::utils::AssetId::native("testnet"),
+        token_1: nodus_core_engine::utils::AssetId {
+            network: "testnet".into(),
+            asset_type: nodus_core_engine::utils::AssetType::ContractToken,
+            symbol: "USDC".into(),
+            decimals: 7,
+            issuer: None,
+            contract: Some(contract_strkey(2)),
+        },
         base_fee_stroops: 100,
         fee_ceiling_stroops: 1_000_000,
+        provider_divergence_max_ledgers: 5,
     };
     ContractClient::new(
         SorobanRpc::with_transport(Box::new(transport)),
@@ -209,8 +218,8 @@ async fn reserves_decodes_typed_instance_storage() {
     assert_eq!(reserves.reserve_1, (7777u128 << 64) | 12_345);
     assert_eq!(reserves.timestamp_last, 1_700_000_000);
     assert_eq!(reserves.lp_total_supply, 100_000);
-    assert_eq!(reserves.token_0, "XLM");
-    assert_eq!(reserves.token_1, "USDC");
+    assert_eq!(reserves.token_0.symbol, "XLM");
+    assert_eq!(reserves.token_1.symbol, "USDC");
 }
 
 // ── Golden happy path: lp_balance via the actual LP token contract ──────────
