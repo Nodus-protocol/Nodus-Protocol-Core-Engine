@@ -1,6 +1,8 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+pub mod reconciliation;
+
 use serde_json::Value;
 use uuid::Uuid;
 
@@ -50,7 +52,7 @@ impl Engine {
         asset: AssetId,
         urgency: Urgency,
     ) -> Result<Payment, EngineError> {
-        self.run_initiation(sender, recipient, amount, token, urgency, None)
+        self.run_initiation(sender, recipient, amount, asset, urgency, None)
             .await
     }
 
@@ -106,7 +108,7 @@ impl Engine {
                         req.sender,
                         req.recipient,
                         req.amount,
-                        req.token,
+                        req.asset,
                         req.urgency,
                         Some(&checkpoint),
                     )
@@ -125,7 +127,7 @@ impl Engine {
         sender: String,
         recipient: String,
         amount: u64,
-        token: String,
+        asset: AssetId,
         urgency: Urgency,
         checkpoint: Option<&SubmitCheckpoint<'_>>,
     ) -> Result<Payment, EngineError> {
@@ -303,12 +305,13 @@ pub struct IdempotentRequest<'a> {
     pub sender: String,
     pub recipient: String,
     pub amount: u64,
-    pub token: String,
+    pub asset: AssetId,
     pub urgency: Urgency,
 }
 
 /// Result of an idempotent initiation: either the work ran now, or a
 /// previously-recorded response was replayed.
+#[allow(clippy::large_enum_variant)]
 pub enum IdempotentInitiation {
     Executed(Payment),
     Replayed(Value),

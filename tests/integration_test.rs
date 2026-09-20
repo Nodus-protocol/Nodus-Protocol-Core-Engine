@@ -5,7 +5,7 @@ use nodus_core_engine::adapters::mock::MockAdapter;
 use nodus_core_engine::engine::Engine;
 use nodus_core_engine::idempotency::{ClaimOutcome, ClaimStore, MemoryClaimStore};
 use nodus_core_engine::retry::RetryConfig;
-use nodus_core_engine::utils::{PaymentStatus, Urgency};
+use nodus_core_engine::utils::{AssetId, AssetType, PaymentStatus, Urgency};
 
 fn claim_store() -> Arc<MemoryClaimStore> {
     Arc::new(MemoryClaimStore::new())
@@ -13,6 +13,21 @@ fn claim_store() -> Arc<MemoryClaimStore> {
 
 fn engine_with_mock(mock: MockAdapter) -> Engine {
     Engine::new(vec![Arc::new(mock)], RetryConfig::new(1, 0), claim_store())
+}
+
+fn xlm() -> AssetId {
+    AssetId::native("testnet")
+}
+
+fn usdc() -> AssetId {
+    AssetId {
+        network: "testnet".into(),
+        asset_type: AssetType::ContractToken,
+        symbol: "USDC".into(),
+        decimals: 7,
+        issuer: None,
+        contract: Some("CBAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM".into()),
+    }
 }
 
 const ALICE: &str = "GAHJJJKMOKYE4RVPZEWZTKH5FVI4PA3VL7GK2LFNUBSGBV7REEX6XCLD";
@@ -27,7 +42,7 @@ async fn successful_payment_is_confirmed() {
             ALICE.into(),
             BOB.into(),
             1_000_000,
-            "XLM".into(),
+            xlm(),
             Urgency::Standard,
         )
         .await
@@ -45,7 +60,7 @@ async fn failed_adapter_marks_payment_failed() {
     let engine = engine_with_mock(MockAdapter::failing("mock-fail"));
 
     let payment = engine
-        .initiate(ALICE.into(), BOB.into(), 500, "XLM".into(), Urgency::Fast)
+        .initiate(ALICE.into(), BOB.into(), 500, xlm(), Urgency::Fast)
         .await
         .expect("initiate should not error at engine level");
 
@@ -58,7 +73,7 @@ async fn failed_adapter_marks_payment_failed() {
 async fn rejects_zero_amount() {
     let engine = engine_with_mock(MockAdapter::new("mock"));
     let result = engine
-        .initiate(ALICE.into(), BOB.into(), 0, "XLM".into(), Urgency::Standard)
+        .initiate(ALICE.into(), BOB.into(), 0, xlm(), Urgency::Standard)
         .await;
     assert!(result.is_err());
 }
@@ -71,7 +86,7 @@ async fn rejects_invalid_sender_address() {
             "not-a-stellar-address".into(),
             BOB.into(),
             100,
-            "XLM".into(),
+            xlm(),
             Urgency::Standard,
         )
         .await;
@@ -83,19 +98,13 @@ async fn payment_is_retrievable_after_creation() {
     let engine = engine_with_mock(MockAdapter::new("mock"));
 
     let payment = engine
-        .initiate(
-            ALICE.into(),
-            BOB.into(),
-            250,
-            "USDC".into(),
-            Urgency::Urgent,
-        )
+        .initiate(ALICE.into(), BOB.into(), 250, usdc(), Urgency::Urgent)
         .await
         .unwrap();
 
     let fetched = engine.get(&payment.id).unwrap();
     assert_eq!(fetched.id, payment.id);
-    assert_eq!(fetched.token, "USDC");
+    assert_eq!(fetched.asset.symbol, "USDC");
 }
 
 #[tokio::test]
@@ -104,13 +113,7 @@ async fn list_returns_all_payments() {
 
     for amount in [100, 200, 300] {
         engine
-            .initiate(
-                ALICE.into(),
-                BOB.into(),
-                amount,
-                "XLM".into(),
-                Urgency::Standard,
-            )
+            .initiate(ALICE.into(), BOB.into(), amount, xlm(), Urgency::Standard)
             .await
             .unwrap();
     }
@@ -123,7 +126,7 @@ async fn simulation_returns_fee_estimate() {
     let engine = engine_with_mock(MockAdapter::new("mock"));
 
     let result = engine
-        .simulate(ALICE.into(), BOB.into(), 1_000, "XLM".into(), Urgency::Fast)
+        .simulate(ALICE.into(), BOB.into(), 1_000, xlm(), Urgency::Fast)
         .await
         .unwrap();
 

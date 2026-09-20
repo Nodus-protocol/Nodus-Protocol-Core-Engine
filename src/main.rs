@@ -105,7 +105,7 @@ async fn main() {
     let claims = idempotency::create_claim_store(cfg.redis_url.as_deref(), cfg.network)
         .await
         .expect("idempotency claim store unavailable");
-    let engine = Arc::new(Engine::new(vec![stellar], retry_config, claims));
+    let engine = Arc::new(Engine::new(vec![stellar], retry_config, claims.clone()));
     let webhooks = Arc::new(WebhookStore::new());
     let rates = RateService::new();
 
@@ -124,11 +124,28 @@ async fn main() {
         );
     }
 
+    let reconciliation = pool_client.as_ref().and_then(|pool| {
+        pool.providers().map(|provider_pool| {
+            let event_index: Option<Arc<dyn engine::reconciliation::EventIndexClient>> =
+                cfg.event_index_url.as_ref().map(|url| {
+                    Arc::new(engine::reconciliation::HttpEventIndexClient::new(url))
+                        as Arc<dyn engine::reconciliation::EventIndexClient>
+                });
+            Arc::new(engine::reconciliation::ReconciliationManager::new(
+                provider_pool,
+                event_index,
+                Some(claims.clone()),
+                cfg.network,
+            ))
+        })
+    });
+
     let state: AppState = Arc::new(AppContext {
         engine,
         rates,
         webhooks,
         pool: pool_client,
+        reconciliation,
         config: cfg.clone(),
     });
 
@@ -162,6 +179,10 @@ async fn main() {
         .route("/healthz", get(api::health::healthz))
         .route("/readyz", get(api::health::readyz))
         .route("/metrics", get(api::health::metrics))
+        .route(
+            "/internal/reconciliation/status",
+            get(api::health::reconciliation_status),
+        )
         // Reads. `GET /api/v1/payments` (list) lives here; `POST` on the
         // same path (initiate) is a submission and is registered separately
         // below in the tx_submit group, so each method carries its own

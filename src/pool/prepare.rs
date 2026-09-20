@@ -57,6 +57,8 @@ pub struct ReviewSummary {
     pub operation_count: usize,
     pub auth_entry_count: usize,
     pub auth: Vec<AuthSummary>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub simulation_ledger: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -76,6 +78,8 @@ pub struct ValidateContext {
     pub fee_ceiling_stroops: u32,
     pub now: u64,
     pub expected_sequence: Option<i64>,
+    pub current_ledger: Option<u32>,
+    pub simulation_ledger: Option<u32>,
 }
 
 // ── Prepare ──────────────────────────────────────────────────────────────────
@@ -180,6 +184,8 @@ pub async fn prepare(
     // is also where a future code path that let simulation mutate the
     // invoke args (rather than only add footprint/fee/auth) would be
     // caught — see the args-drift check inside `validate`.
+    let sim_ledger = sim.latest_ledger;
+
     let review = validate(
         &prepared_xdr,
         &ValidateContext {
@@ -189,6 +195,8 @@ pub async fn prepare(
             fee_ceiling_stroops: pool.fee_ceiling_stroops,
             now,
             expected_sequence: Some(sequence),
+            current_ledger: sim_ledger,
+            simulation_ledger: sim_ledger,
         },
     )?;
 
@@ -329,6 +337,15 @@ pub fn validate(xdr: &str, ctx: &ValidateContext) -> Result<ReviewSummary, Engin
         })
         .collect();
 
+    if let (Some(curr), Some(sim)) = (ctx.current_ledger, ctx.simulation_ledger) {
+        if curr > sim + crate::pool::provider::MAX_SIMULATION_LEDGER_DRIFT {
+            return Err(EngineError::PreconditionFailed(format!(
+                "simulation expired: simulated at ledger {sim}, current ledger is {curr} (max allowed drift: {})",
+                crate::pool::provider::MAX_SIMULATION_LEDGER_DRIFT
+            )));
+        }
+    }
+
     Ok(ReviewSummary {
         spec_hash: abi::spec_hash().to_string(),
         contract: contract_str,
@@ -342,6 +359,7 @@ pub fn validate(xdr: &str, ctx: &ValidateContext) -> Result<ReviewSummary, Engin
         operation_count: tx.operations.len(),
         auth_entry_count: invoke.auth.len(),
         auth,
+        simulation_ledger: ctx.simulation_ledger,
     })
 }
 

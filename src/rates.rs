@@ -108,9 +108,9 @@ impl RateService {
 
         // CoinGecko returns a float; convert to micro-USD integer to avoid
         // storing f64 in the cache or in API responses.
-        let price_f64 = body[id]["usd"]
-            .as_f64()
-            .ok_or_else(|| EngineError::NotFound(format!("no price data for '{}'", asset.symbol)))?;
+        let price_f64 = body[id]["usd"].as_f64().ok_or_else(|| {
+            EngineError::NotFound(format!("no price data for '{}'", asset.symbol))
+        })?;
 
         // Round to nearest micro-USD.
         Ok((price_f64 * 1_000_000.0).round() as u64)

@@ -67,11 +67,11 @@ pub fn symbol(sym: &str) -> Result<(), EngineError> {
 /// 4. Type-specific field coherence:
 ///    - `Native`:        no issuer, no contract required.
 ///    - `IssuedAsset`:   `issuer` required and must be a valid G… address;
-///                       `contract`, if present, must be a valid C… address.
+///      `contract`, if present, must be a valid C… address.
 ///    - `ContractToken`: `contract` required and must be a valid C… address;
-///                       `issuer` must be absent (prevents attaching a
-///                       classic issuer to a Soroban-only token, which is
-///                       how same-symbol impostors sneak in).
+///      `issuer` must be absent (prevents attaching a
+///      classic issuer to a Soroban-only token, which is
+///      how same-symbol impostors sneak in).
 /// 5. Network coherence: testnet assets must not carry mainnet contract
 ///    addresses (we cannot verify the chain from the string alone, but we
 ///    reject any asset whose `network` field disagrees with the engine's
@@ -174,6 +174,7 @@ pub fn asset_id(asset: &AssetId) -> Result<(), EngineError> {
 
 /// Checks that `asset.network` matches the engine's configured network.
 /// Rejects cross-network assets before they reach simulation or quote logic.
+#[allow(dead_code)]
 pub fn asset_network(asset: &AssetId, engine_network: &str) -> Result<(), EngineError> {
     if asset.network != engine_network {
         return Err(EngineError::InvalidRequest(format!(
@@ -189,6 +190,7 @@ pub fn asset_network(asset: &AssetId, engine_network: &str) -> Result<(), Engine
 /// `pool_tokens` should be the slice of canonical keys from the pool config
 /// (contract addresses or "native"). Returns the matching canonical key or
 /// an error if the token is not in the pool.
+#[allow(dead_code)]
 pub fn token_in_pool<'a>(asset: &AssetId, pool_tokens: &[&'a str]) -> Result<&'a str, EngineError> {
     let key = asset.canonical_key();
     pool_tokens

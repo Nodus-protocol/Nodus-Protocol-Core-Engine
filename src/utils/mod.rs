@@ -163,7 +163,10 @@ pub struct RationalPrice {
 
 impl RationalPrice {
     pub fn new(numerator: u128, denominator: u128) -> Self {
-        assert!(denominator > 0, "RationalPrice denominator must be non-zero");
+        assert!(
+            denominator > 0,
+            "RationalPrice denominator must be non-zero"
+        );
         // Reduce by GCD for canonical representation.
         let g = gcd(numerator, denominator);
         RationalPrice {

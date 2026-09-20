@@ -8,6 +8,9 @@ use axum::{
 use serde::{Deserialize, Serialize};
 
 use crate::api::AppState;
+use crate::config::Network;
+use crate::engine::{IdempotentInitiation, IdempotentRequest};
+use crate::idempotency::IdempotencyNamespace;
 use crate::utils::{ApiError, AssetId, EngineError, Urgency};
 
 impl IntoResponse for EngineError {
@@ -64,7 +67,7 @@ pub async fn initiate(
                 req.sender,
                 req.recipient,
                 req.amount,
-                req.token,
+                req.asset,
                 req.urgency,
             )
             .await?;
@@ -80,13 +83,17 @@ pub async fn initiate(
 
     let outcome = ctx
         .engine
-        .initiate(
-            req.sender,
-            req.recipient,
-            req.amount,
-            req.asset,
-            req.urgency,
-        )
+        .initiate_idempotent(IdempotentRequest {
+            namespace: &namespace,
+            client_key: &client_key,
+            request_body: &request_body,
+            ttl: Duration::from_secs(ctx.config.auth_replay_window_secs),
+            sender: req.sender,
+            recipient: req.recipient,
+            amount: req.amount,
+            asset: req.asset,
+            urgency: req.urgency,
+        })
         .await?;
 
     Ok(match outcome {
@@ -126,7 +133,13 @@ pub async fn simulate(
 ) -> Result<impl IntoResponse, EngineError> {
     let result = ctx
         .engine
-        .simulate(req.sender, req.recipient, req.amount, req.asset, req.urgency)
+        .simulate(
+            req.sender,
+            req.recipient,
+            req.amount,
+            req.asset,
+            req.urgency,
+        )
         .await?;
     Ok(Json(result))
 }

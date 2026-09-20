@@ -16,6 +16,7 @@ pub struct Config {
     pub webhook_timeout_secs: u64,
     pub pool: Option<PoolConfig>,
     pub redis_url: Option<String>,
+    #[allow(dead_code)]
     pub idempotency_ttl_secs: u64,
     pub release: String,
     pub manifest: String,
@@ -42,6 +43,7 @@ pub struct Config {
     /// Explicit override to run without the TLS attestation above. Only
     /// meant for local development — `validate()` still blocks mainnet.
     pub allow_insecure_transport: bool,
+    pub event_index_url: Option<String>,
 }
 
 // Config intentionally excludes secrets from its Debug output — never derive
@@ -86,11 +88,19 @@ impl Network {
             ))),
         }
     }
+
+    pub fn passphrase(&self) -> &'static str {
+        match self {
+            Network::Mainnet => "Public Global Stellar Network ; September 2015",
+            Network::Testnet => "Test SDF Network ; September 2015",
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
 pub struct PoolConfig {
     pub soroban_rpc_url: String,
+    pub soroban_rpc_urls: Vec<String>,
     pub contract_id: String,
     /// Canonical identity of the first pool token (token-0 in contract ordering).
     /// Loaded from `POOL_TOKEN_0_JSON` (a JSON-serialised [`AssetId`]).
@@ -105,6 +115,8 @@ pub struct PoolConfig {
     /// stroops. Transaction preparation refuses to hand back a transaction
     /// priced above this, regardless of what simulation says it costs.
     pub fee_ceiling_stroops: u32,
+    /// Maximum allowed ledger divergence across approved providers
+    pub provider_divergence_max_ledgers: u32,
 }
 
 /// Parse an [`AssetId`] from the value of an environment variable.
@@ -151,7 +163,7 @@ pub fn parse_asset_id(env_var: &str, network: Network) -> Option<AssetId> {
             asset_type: AssetType::IssuedAsset,
             symbol: sym.to_string(),
             decimals: 7,
-            issuer: None,   // unknown — not safe for mainnet
+            issuer: None, // unknown — not safe for mainnet
             contract: None,
         },
     })
@@ -171,6 +183,16 @@ impl Config {
 
         let pool = {
             let rpc = env::var("SOROBAN_RPC_URL").ok();
+            let rpcs = env::var("SOROBAN_RPC_URLS")
+                .ok()
+                .map(|s| {
+                    s.split(',')
+                        .map(|u| u.trim().to_string())
+                        .filter(|u| !u.is_empty())
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+
             let contract = env::var("POOL_CONTRACT_ID").ok();
             // Prefer JSON env vars; fall back to legacy bare-symbol vars for
             // backward compatibility in local/testnet setups.
@@ -179,9 +201,20 @@ impl Config {
             let t1 = parse_asset_id("POOL_TOKEN_1_JSON", network)
                 .or_else(|| parse_asset_id("POOL_TOKEN_1", network));
 
-            match (rpc, contract, t0, t1) {
-                (Some(rpc), Some(contract), Some(t0), Some(t1)) => Some(PoolConfig {
-                    soroban_rpc_url: rpc,
+            let all_rpcs = if !rpcs.is_empty() {
+                rpcs
+            } else if let Some(ref r) = rpc {
+                vec![r.clone()]
+            } else {
+                Vec::new()
+            };
+
+            let primary_rpc = all_rpcs.first().cloned().or(rpc);
+
+            match (primary_rpc, contract, t0, t1) {
+                (Some(rpc_url), Some(contract), Some(t0), Some(t1)) => Some(PoolConfig {
+                    soroban_rpc_url: rpc_url,
+                    soroban_rpc_urls: all_rpcs,
                     contract_id: contract,
                     token_0: t0,
                     token_1: t1,
@@ -193,6 +226,12 @@ impl Config {
                         .ok()
                         .and_then(|v| v.parse().ok())
                         .unwrap_or(10_000_000),
+                    provider_divergence_max_ledgers: env::var(
+                        "POOL_PROVIDER_DIVERGENCE_MAX_LEDGERS",
+                    )
+                    .ok()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(2),
                 }),
                 _ => None,
             }
@@ -274,6 +313,7 @@ impl Config {
             allow_insecure_transport: env::var("ENGINE_ALLOW_INSECURE_TRANSPORT")
                 .map(|v| v == "true")
                 .unwrap_or(false),
+            event_index_url: env::var("EVENT_INDEX_URL").ok(),
         }
     }
 
@@ -370,6 +410,7 @@ mod tests {
             cors_allowed_origins: Vec::new(),
             tls_terminated_upstream: false,
             allow_insecure_transport: true,
+            event_index_url: None,
         }
     }
 
