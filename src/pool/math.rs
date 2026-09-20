@@ -1,7 +1,7 @@
-// AMM constant-product math — mirrors src/math.rs in the Smart Contract repo.
+// AMM constant-product math — mirrors contracts/pool/src/math.rs in the Smart Contract repo.
 //
 // SYNCHRONIZATION WARNING:
-// These constants MUST match `src/math.rs` in the Nodus-Protocol-Smart-Contract
+// These constants MUST match `contracts/pool/src/math.rs` in the Nodus-Protocol-Smart-Contract
 // repository exactly. CI verifies this automatically (see
 // .github/workflows/ci.yml, "Verify fee constants match smart contract" step),
 // which fetches the live Smart Contract source and fails the build on drift.

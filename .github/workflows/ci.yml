@@ -21,7 +21,7 @@ jobs:
         run: cargo clippy --all-targets --all-features -- -D warnings
       - name: Verify fee constants match smart contract
         run: |
-          curl -sf https://raw.githubusercontent.com/Nodus-protocol/Nodus-Protocol-Smart-Contract/main/src/math.rs -o /tmp/sc_math.rs
+          curl -sf https://raw.githubusercontent.com/Nodus-protocol/Nodus-Protocol-Smart-Contract/main/contracts/pool/src/math.rs -o /tmp/sc_math.rs || curl -sf https://raw.githubusercontent.com/Nodus-protocol/Nodus-Protocol-Smart-Contract/main/src/math.rs -o /tmp/sc_math.rs
           extract_value() {
             grep -E "^\s*pub const ${1}:" "$2" | sed -E 's/.*=\s*([0-9_]+)\s*;.*/\1/' | tr -d '_'
           }
@@ -47,7 +47,7 @@ jobs:
             FAIL=1
           fi
           if [ "$FAIL" = "1" ]; then
-            echo "AMM constants have drifted between Smart Contract and Core Engine repos. Update src/pool/math.rs to match src/math.rs in Nodus-Protocol-Smart-Contract."
+            echo "AMM constants have drifted between Smart Contract and Core Engine repos. Update src/pool/math.rs to match contracts/pool/src/math.rs in Nodus-Protocol-Smart-Contract."
             exit 1
           fi
           echo "AMM constants verified in sync with Smart Contract."
